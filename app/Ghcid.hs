@@ -101,7 +101,7 @@ options = cmdArgsMode $ Options
     ,topmost = False &= name "t" &= help "Set window topmost (Windows only)"
     ,no_title = False &= help "Don't update the shell title/icon"
     ,project = "" &= typ "NAME" &= help "Name of the project, defaults to current directory"
-    ,restart = [] &= typ "PATH" &= help "Restart the command when the given file or directory contents change (defaults to .ghci and any .cabal file, unless when using stack or a custom command)"
+    ,restart = [] &= typ "PATH" &= help "Restart the command when the given file or directory contents change (defaults to .ghci, stack.yaml, cabal.project and any .cabal file)"
     ,reload = [] &= typ "PATH" &= help "Reload when the given file or directory contents change (defaults to none)"
     ,directory = "." &= typDir &= name "C" &= help "Set the current directory"
     ,outputfile = [] &= typFile &= name "o" &= help "File to write the full output to"
@@ -148,6 +148,7 @@ autoOptions o ghciScript = autoCommand o ghciScript <$> probeProject
 data ProjectProbe = ProjectProbe
     {probeCurdir :: FilePath -- ^ The current directory
     ,probeStackYaml :: Maybe FilePath -- ^ stack.yaml, when the project builds with stack
+    ,probeCabalProject :: [FilePath] -- ^ The cabal.project files that exist in the current directory
     ,probeCabalFiles :: [FilePath] -- ^ The project's .cabal files
     ,probeDotGhci :: Bool -- ^ Whether @.ghci@ exists in the current directory
     }
@@ -161,17 +162,30 @@ probeProject = do
             b <- doesFileExist yaml &&^ doesDirectoryExist (dir </> ".stack-work")
             pure $ if b then Just yaml else Nothing
     stackFile <- firstJustM findStack [".",".."] -- stack file might be parent, see #62
+    let cabalProject = [curdir </> x | x <- ["cabal.project","cabal.project.local"], x `elem` files]
+    cabalFiles <- if "cabal.project" `elem` files
+        then findCabalFiles curdir -- a cabal.project's packages may sit in subdirectories
+        else pure $ map (curdir </>) $ filter ((==) ".cabal" . takeExtension) files
     pure ProjectProbe
         {probeCurdir = curdir
         ,probeStackYaml = stackFile
-        ,probeCabalFiles = map (curdir </>) $ filter ((==) ".cabal" . takeExtension) files
+        ,probeCabalProject = cabalProject
+        ,probeCabalFiles = cabalFiles
         ,probeDotGhci = ".ghci" `elem` files
         }
+
+-- | All .cabal files under a directory, skipping dot and dist-newstyle directories.
+findCabalFiles :: FilePath -> IO [FilePath]
+findCabalFiles root = flip catchIOError (const $ pure []) $ do
+    (dirs, files) <- partitionM doesDirectoryExist =<< listContents root
+    let keep d = not $ any (`isPrefixOf` takeFileName d) [".", "dist-newstyle"]
+    rest <- concatMapM findCabalFiles $ filter keep dirs
+    pure $ filter ((==) ".cabal" . takeExtension) files ++ rest
 
 -- | Pick the command and restart set from the probed project shape.
 autoCommand :: Options -> String -> ProjectProbe -> Options
 autoCommand o@Options{..} ghciScript ProjectProbe{..}
-    | command /= "" = f [command] []
+    | command /= "" = f [command] $ maybeToList probeStackYaml ++ probeCabalProject ++ probeCabalFiles
     | Just stack <- probeStackYaml =
         let flags = if null arguments then
                         "stack ghci" : target ++ "--test --bench" :
@@ -180,11 +194,11 @@ autoCommand o@Options{..} ghciScript ProjectProbe{..}
                     else
                         "stack exec --test --bench -- ghci" : opts
         in f flags $ stack:probeCabalFiles
-    | probeCabalFiles /= [] =
+    | probeCabalFiles /= [] || probeCabalProject /= [] =
         let rtsopts = ["\"+RTS -N -RTS\"" | not no_cabal_repl_rtsopts]
             useCabal = ["cabal","repl"] ++ target ++ map ("--repl-options=" ++) (rtsopts ++ opts)
             useGhci = "cabal exec -- ghci":opts
-        in  f (if null arguments then useCabal else useGhci) probeCabalFiles
+        in  f (if null arguments then useCabal else useGhci) $ probeCabalProject ++ probeCabalFiles
     | probeDotGhci = f ("ghci":opts) [probeCurdir </> ".ghci"]
     | otherwise = f ("ghci":opts) []
     where

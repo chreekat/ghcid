@@ -27,6 +27,7 @@ bareProbe :: ProjectProbe
 bareProbe = ProjectProbe
     {probeCurdir = "/proj"
     ,probeStackYaml = Nothing
+    ,probeCabalProject = []
     ,probeCabalFiles = []
     ,probeDotGhci = False}
 
@@ -69,4 +70,15 @@ autoTests = testGroup "Auto command"
     ,testCase "Explicit command wins" $ do
         let o = auto defaultOptions{command = "my repl"} bareProbe{probeCabalFiles = ["/proj/foo.cabal"]}
         command o @?= "my repl"
+    ,testCase "Explicit command still restarts on project files" $ do
+        let probe = bareProbe
+                {probeStackYaml = Just "/proj/stack.yaml"
+                ,probeCabalProject = ["/proj/cabal.project"]
+                ,probeCabalFiles = ["/proj/pkg/foo.cabal"]}
+        let o = auto defaultOptions{command = "my repl"} probe
+        restart o @?= ["/proj/stack.yaml", "/proj/cabal.project", "/proj/pkg/foo.cabal"]
+    ,testCase "cabal.project without top-level .cabal still picks cabal" $ do
+        let o = auto defaultOptions bareProbe{probeCabalProject = ["/proj/cabal.project"], probeCabalFiles = ["/proj/pkg/foo.cabal"]}
+        o `commandHas` "cabal repl"
+        restart o @?= ["/proj/cabal.project", "/proj/pkg/foo.cabal"]
     ]
