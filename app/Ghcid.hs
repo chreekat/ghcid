@@ -15,7 +15,7 @@ import Data.List.Extra
 import Data.Maybe
 import Data.Ord
 import Data.Tuple.Extra
-import Data.Version
+import Data.Version.Extra
 import Session
 import Server
 import qualified System.Console.Terminal.Size as Term
@@ -110,7 +110,7 @@ options = cmdArgsMode $ Options
     ,max_messages = Nothing &= name "n" &= help "Maximum number of messages to print"
     ,color = Auto &= name "colour" &= name "color" &= opt Always &= typ "always/never/auto" &= help "Color output (defaults to when the terminal supports it)"
     ,setup = [] &= name "setup" &= typ "COMMAND" &= help "Setup commands to pass to ghci on stdin, usually :set <something>"
-    ,no_cabal_repl_rtsopts = False &= explicit &= name "no-cabal-repl-rtsopts" &= help "Disable default +RTS -N -RTS when using the auto-selected cabal repl command"
+    ,no_cabal_repl_rtsopts = False &= explicit &= name "no-cabal-repl-rtsopts" &= help "Disable default +RTS -N -A64m -RTS when using the auto-selected cabal repl command"
     ,allow_eval = False &= name "allow-eval" &= help "Execute REPL commands in comments"
     ,server = False &= explicit &= name "server" &= help "Enable the local ghcid socket server"
     ,target = [] &= typ "TARGET" &= help "Target Component to build (e.g. lib:foo for Cabal, foo:lib for Stack)"
@@ -151,6 +151,8 @@ data ProjectProbe = ProjectProbe
     ,probeCabalProject :: [FilePath] -- ^ The cabal.project files that exist in the current directory
     ,probeCabalFiles :: [FilePath] -- ^ The project's .cabal files
     ,probeDotGhci :: Bool -- ^ Whether @.ghci@ exists in the current directory
+    ,probeGhcVersion :: Maybe Version -- ^ The version of ghc on $PATH
+    ,probeCabalVersion :: Maybe Version -- ^ The version of cabal on $PATH
     }
 
 probeProject :: IO ProjectProbe
@@ -166,13 +168,26 @@ probeProject = do
     cabalFiles <- if "cabal.project" `elem` files
         then findCabalFiles curdir -- a cabal.project's packages may sit in subdirectories
         else pure $ map (curdir </>) $ filter ((==) ".cabal" . takeExtension) files
+    -- Versions of the tools on $PATH. Best-effort: cabal may still pick
+    -- another ghc (with-compiler), so gate flags conservatively on these.
+    (ghcVersion, cabalVersion) <-
+        if isNothing stackFile && (cabalFiles /= [] || cabalProject /= [])
+            then (,) <$> probeVersion "ghc" <*> probeVersion "cabal"
+            else pure (Nothing, Nothing)
     pure ProjectProbe
         {probeCurdir = curdir
         ,probeStackYaml = stackFile
         ,probeCabalProject = cabalProject
         ,probeCabalFiles = cabalFiles
         ,probeDotGhci = ".ghci" `elem` files
+        ,probeGhcVersion = ghcVersion
+        ,probeCabalVersion = cabalVersion
         }
+
+probeVersion :: String -> IO (Maybe Version)
+probeVersion exe = handle (\(_ :: SomeException) -> pure Nothing) $ do
+    out <- trim <$> readProcess exe ["--numeric-version"] ""
+    Just <$> evaluate (readVersion out)
 
 -- | All .cabal files under a directory, skipping dot and dist-newstyle directories.
 findCabalFiles :: FilePath -> IO [FilePath]
@@ -195,8 +210,23 @@ autoCommand o@Options{..} ghciScript ProjectProbe{..}
                         "stack exec --test --bench -- ghci" : opts
         in f flags $ stack:probeCabalFiles
     | probeCabalFiles /= [] || probeCabalProject /= [] =
-        let rtsopts = ["\"+RTS -N -RTS\"" | not no_cabal_repl_rtsopts]
-            useCabal = ["cabal","repl"] ++ target ++ map ("--repl-options=" ++) (rtsopts ++ opts)
+        let rtsopts = ["\"+RTS -N -A64m -RTS\"" | not no_cabal_repl_rtsopts]
+            since v flag = [flag | probeGhcVersion >= Just (makeVersion v)]
+            multiRepl = probeCabalVersion >= Just (makeVersion [3,12])
+                     && probeGhcVersion >= Just (makeVersion [9,4])
+            extra = concat
+                [["-fbyte-code" | null noCode] -- tests/evals need code, but never object code
+                ,since [8,2] "-fno-hide-source-paths"
+                ,since [8,10] "-fdefer-diagnostics" -- group diagnostics after the parallel-load noise
+                ,since [9,6] "-fprefer-byte-code" -- TH splices load byte-code deps, skipping codegen
+                ,since [9,6] "-fwrite-if-simplified-core" -- restart from interfaces, not source
+                ,since [9,8] "-fno-break-points" -- no debugger under ghcid; skip breakpoint ticks
+                ]
+            -- A separate builddir keeps repl artifacts from competing with `cabal build`.
+            useCabal = ["cabal","repl","--builddir=dist-newstyle/ghcid"]
+                ++ (if multiRepl then "--enable-multi-repl" : ["all" | null target] else [])
+                ++ target
+                ++ map ("--repl-options=" ++) (rtsopts ++ extra ++ opts)
             useGhci = "cabal exec -- ghci":opts
         in  f (if null arguments then useCabal else useGhci) $ probeCabalProject ++ probeCabalFiles
     | probeDotGhci = f ("ghci":opts) [probeCurdir </> ".ghci"]
