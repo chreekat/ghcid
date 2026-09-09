@@ -2,7 +2,10 @@
 {-# OPTIONS_GHC -fno-cse #-}
 
 -- | The application entry point
-module Ghcid(main, mainWithTerminal, TermSize(..), WordWrap(..), shouldWatchLoadConfig) where
+module Ghcid(
+    main, mainWithTerminal, TermSize(..), WordWrap(..), shouldWatchLoadConfig,
+    Options(..), ColorMode(..), ProjectProbe(..), autoCommand
+    ) where
 
 import Control.Exception
 import System.IO.Error
@@ -139,44 +142,59 @@ Warnings:
 As a result, we prefer to give users full control with a .ghci file, if available
 -}
 autoOptions :: Options -> String -> IO Options
-autoOptions o@Options{..} ghciScript
-    | command /= "" = pure $ f [command] []
-    | otherwise = do
-        curdir <- getCurrentDirectory
-        files <- getDirectoryContents "."
+autoOptions o ghciScript = autoCommand o ghciScript <$> probeProject
 
-        -- use unsafePerformIO to get nicer pattern matching for logic (read-only operations)
-        let findStack dir = flip catchIOError (const $ pure Nothing) $ do
-                let yaml = dir </> "stack.yaml"
-                b <- doesFileExist yaml &&^ doesDirectoryExist (dir </> ".stack-work")
-                pure $ if b then Just yaml else Nothing
-        stackFile <- firstJustM findStack [".",".."] -- stack file might be parent, see #62
+-- | Facts about the project directory that determine the default command.
+data ProjectProbe = ProjectProbe
+    {probeCurdir :: FilePath -- ^ The current directory
+    ,probeStackYaml :: Maybe FilePath -- ^ stack.yaml, when the project builds with stack
+    ,probeCabalFiles :: [FilePath] -- ^ The project's .cabal files
+    ,probeDotGhci :: Bool -- ^ Whether @.ghci@ exists in the current directory
+    }
 
-        let cabal = map (curdir </>) $ filter ((==) ".cabal" . takeExtension) files
-        let isLib = isPrefixOf "lib:"  -- `lib:foo` is the Cabal format
-        let noCode = [ "-fno-code"
-                     | null test
-                       && null run
-                       && not allow_eval
-                       && (isJust stackFile || all isLib target) ]
-        let opts = noCode ++ ghciFlagsRequired ++ ghciFlagsUseful ++ ["-ghci-script=" ++ ghciScript]
-        pure $ case () of
-            _ | Just stack <- stackFile ->
-                let flags = if null arguments then
-                                "stack ghci" : target ++ "--test --bench" :
-                                ["--no-load" | ".ghci" `elem` files] ++
-                                map ("--ghci-options=" ++) opts
-                            else
-                                "stack exec --test --bench -- ghci" : opts
-                in f flags $ stack:cabal
-              | cabal /= [] ->
-                  let rtsopts = ["\"+RTS -N -RTS\"" | not no_cabal_repl_rtsopts]
-                      useCabal = ["cabal","repl"] ++ target ++ map ("--repl-options=" ++) (rtsopts ++ opts)
-                      useGhci = "cabal exec -- ghci":opts
-                  in  f (if null arguments then useCabal else useGhci) cabal
-              | ".ghci" `elem` files -> f ("ghci":opts) [curdir </> ".ghci"]
-              | otherwise -> f ("ghci":opts) []
+probeProject :: IO ProjectProbe
+probeProject = do
+    curdir <- getCurrentDirectory
+    files <- getDirectoryContents "."
+    let findStack dir = flip catchIOError (const $ pure Nothing) $ do
+            let yaml = dir </> "stack.yaml"
+            b <- doesFileExist yaml &&^ doesDirectoryExist (dir </> ".stack-work")
+            pure $ if b then Just yaml else Nothing
+    stackFile <- firstJustM findStack [".",".."] -- stack file might be parent, see #62
+    pure ProjectProbe
+        {probeCurdir = curdir
+        ,probeStackYaml = stackFile
+        ,probeCabalFiles = map (curdir </>) $ filter ((==) ".cabal" . takeExtension) files
+        ,probeDotGhci = ".ghci" `elem` files
+        }
+
+-- | Pick the command and restart set from the probed project shape.
+autoCommand :: Options -> String -> ProjectProbe -> Options
+autoCommand o@Options{..} ghciScript ProjectProbe{..}
+    | command /= "" = f [command] []
+    | Just stack <- probeStackYaml =
+        let flags = if null arguments then
+                        "stack ghci" : target ++ "--test --bench" :
+                        ["--no-load" | probeDotGhci] ++
+                        map ("--ghci-options=" ++) opts
+                    else
+                        "stack exec --test --bench -- ghci" : opts
+        in f flags $ stack:probeCabalFiles
+    | probeCabalFiles /= [] =
+        let rtsopts = ["\"+RTS -N -RTS\"" | not no_cabal_repl_rtsopts]
+            useCabal = ["cabal","repl"] ++ target ++ map ("--repl-options=" ++) (rtsopts ++ opts)
+            useGhci = "cabal exec -- ghci":opts
+        in  f (if null arguments then useCabal else useGhci) probeCabalFiles
+    | probeDotGhci = f ("ghci":opts) [probeCurdir </> ".ghci"]
+    | otherwise = f ("ghci":opts) []
     where
+        isLib = isPrefixOf "lib:"  -- `lib:foo` is the Cabal format
+        noCode = [ "-fno-code"
+                 | null test
+                   && null run
+                   && not allow_eval
+                   && (isJust probeStackYaml || all isLib target) ]
+        opts = noCode ++ ghciFlagsRequired ++ ghciFlagsUseful ++ ["-ghci-script=" ++ ghciScript]
         f c r = o{command = unwords $ c ++ map escape arguments, arguments = [], restart = restart ++ r, run = [], test = run ++ test}
 
 -- | Simple escaping for command line arguments. Wraps a string in double quotes if it contains a space.

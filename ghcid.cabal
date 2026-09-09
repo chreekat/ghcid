@@ -132,6 +132,7 @@ test-suite ghcid_test
         Server
         Session
         Test.API
+        Test.Auto
         Test.Common
         Test.Ghcid
         Test.Parser

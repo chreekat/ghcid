@@ -7,6 +7,7 @@ import System.IO
 
 import Test.Util
 import Test.Parser
+import Test.Auto
 import Test.API
 import Test.Ghcid
 
@@ -21,6 +22,7 @@ tests :: TestTree
 tests = localOption (NumThreads 1) $ testGroup "Tests"
     [utilsTests
     ,parserTests
+    ,autoTests
     ,apiTests
     ,ghcidTest
     ]
