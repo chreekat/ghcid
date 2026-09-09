@@ -315,8 +315,18 @@ mainWithTerminal termSize termOutput = do
                     then (clearScreen *>)
                     else id
 
+                let output = clear . termOutput . restyle
                 maybe withWaiterNotify withWaiterPoll (poll opts) $ \waiter ->
-                    runGhcid (if allow_eval opts then enableEval session else session) waiter termSize (clear . termOutput . restyle) opts serverEnv
+                    runGhcid (if allow_eval opts then enableEval session else session) waiter termSize output opts serverEnv
+                        `catch` \(UnexpectedExit cmd _ mmsg) -> do
+                            -- A dead session (e.g. a broken .cabal file) can only be
+                            -- restarted, so sit out the broken state until a change.
+                            output $ ["Command \"" ++ cmd ++ "\" exited unexpectedly"]
+                                ++ maybeToList mmsg
+                                ++ ["Waiting for changes that will restart ghcid."]
+                            nextWait <- waitFiles waiter
+                            void $ nextWait $ map (,()) $ restart opts ++ reload opts
+                            pure Continue
         )
 
 
@@ -384,11 +394,6 @@ runGhcid session waiter termSize termOutput opts@Options{..} serverEnv = do
     (messages, loaded) <- sessionStart session command $
         map (":set " ++) ghciFlagsUseful ++ setup
 
-    when (null loaded && not ignoreLoaded) $ do
-        logErr "No files loaded, meaning ghcid will never refresh, so aborting."
-        logErr $ "Command: " ++ command
-        exitFailure
-
     -- Update server with initial messages
     mapM_ (`updateMessages` messages) serverEnv
 
@@ -447,10 +452,20 @@ runGhcid session waiter termSize termOutput opts@Options{..} serverEnv = do
                         showJSON [("loaded",map jString loaded),("messages",map jMessage $ filter isMessage messages)]
                     else
                         unlines $ map unescape $ prettyOutput currTime loadedCount (limitMessages ordMessages) evals
-            when (null loaded && not ignoreLoaded) $ do
+            if null loaded && not ignoreLoaded then
+              if null $ restart ++ reload then do
                 logErr "No files loaded, nothing to wait for. Fix the last error and restart."
                 exitFailure
-            whenJust test $ \t -> do
+              else do
+                -- Nothing to reload, so any change gets a fresh start.
+                logErr "No files loaded, waiting for changes that will restart ghcid."
+                reason <- nextWait $ map (,Restart) $ restart ++ reload
+                currTime <- getShortTime
+                let reason2 = either pure (map fst) reason
+                unless no_status $ outputFill currTime Nothing evals $ "Restarting..." : map ("  " ++) reason2
+                pure Continue
+            else do
+              whenJust test $ \t -> do
                 logDebug $ "TESTING: " ++ t
                 sessionExecAsync session t $ \stderr -> do
                     logDebug "TESTING: Completed"
@@ -461,7 +476,7 @@ runGhcid session waiter termSize termOutput opts@Options{..} serverEnv = do
                      else do
                         updateTitle "(test done)"
                         whenNormal $ outStrLn "\n...done"
-            whenJust lint $ \lintcmd ->
+              whenJust lint $ \lintcmd ->
                 unless hasErrors $ do
                     (exitcode, stdout, stderr) <- readCreateProcessWithExitCode (shell . unwords $ lintcmd : map escape touched) ""
                     unless (exitcode == ExitSuccess) $ do
@@ -469,35 +484,35 @@ runGhcid session waiter termSize termOutput opts@Options{..} serverEnv = do
                         outStrLn output
                         forM_ outputfile $ flip writeFile output
 
-            reason <- nextWait $ map (,Restart) restart
-                              ++ map (,Reload) reload
-                              ++ map (,Reload) loaded
+              reason <- nextWait $ map (,Restart) restart
+                                ++ map (,Reload) reload
+                                ++ map (,Reload) loaded
 
-            let reason1 = case reason of
-                  Left err ->
-                    (Reload, ["Error when waiting, if this happens repeatedly, raise a ghcid bug.", err])
-                  Right files ->
-                    case partition (\(f, mode) -> mode == Reload) files of
-                      -- Prefer restarts over reloads. E.g., in case of both '--reload=dir'
-                      -- and '--restart=dir', ghcid would restart instead of reload.
-                      (_, rs@(_:_)) -> (Restart, map fst rs)
-                      (rl, _) -> (Reload, map fst rl)
+              let reason1 = case reason of
+                    Left err ->
+                      (Reload, ["Error when waiting, if this happens repeatedly, raise a ghcid bug.", err])
+                    Right files ->
+                      case partition (\(f, mode) -> mode == Reload) files of
+                        -- Prefer restarts over reloads. E.g., in case of both '--reload=dir'
+                        -- and '--restart=dir', ghcid would restart instead of reload.
+                        (_, rs@(_:_)) -> (Restart, map fst rs)
+                        (rl, _) -> (Reload, map fst rl)
 
-            currTime <- getShortTime
-            case reason1 of
-              (Reload, reason2) -> do
-                unless no_status $ outputFill currTime Nothing evals $ "Reloading..." : map ("  " ++) reason2
-                mapM_ setReloading serverEnv
-                nextWait <- waitFiles waiter
-                reloadResult <- sessionReload session
-                mapM_ clearReloading serverEnv
-                let (msgs, _, _) = reloadResult
-                mapM_ (`updateMessages` msgs) serverEnv
-                fire nextWait reloadResult
-              (Restart, reason2) -> do
-                -- exit cleanly, since the whole thing is wrapped in a forever
-                unless no_status $ outputFill currTime Nothing evals $ "Restarting..." : map ("  " ++) reason2
-                pure Continue
+              currTime <- getShortTime
+              case reason1 of
+                (Reload, reason2) -> do
+                  unless no_status $ outputFill currTime Nothing evals $ "Reloading..." : map ("  " ++) reason2
+                  mapM_ setReloading serverEnv
+                  nextWait <- waitFiles waiter
+                  reloadResult <- sessionReload session
+                  mapM_ clearReloading serverEnv
+                  let (msgs, _, _) = reloadResult
+                  mapM_ (`updateMessages` msgs) serverEnv
+                  fire nextWait reloadResult
+                (Restart, reason2) -> do
+                  -- exit cleanly, since the whole thing is wrapped in a forever
+                  unless no_status $ outputFill currTime Nothing evals $ "Restarting..." : map ("  " ++) reason2
+                  pure Continue
 
     fire nextWait (messages, loaded, loaded)
 

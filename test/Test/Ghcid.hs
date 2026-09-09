@@ -37,6 +37,8 @@ ghcidTest = localOption (mkTimeout 30000000) $ testGroup "Ghcid test"
     ,loadConfigRestartFilterTest
     ,cabalTest
     ,cabalRestartTest
+    ,noModulesTest
+    ,brokenStartupTest
     ]
 
 
@@ -232,4 +234,22 @@ cabalRestartTest = testCase "Ghcid Cabal restart with custom command" $ inCabalS
     withGhcid ["-ccabal repl"] $ \require -> do
         require [allGoodMessage]
         append "bar.cabal" "\n-- touched by test\n"
+        require [allGoodMessage]
+
+-- | Zero loaded modules must wait for a change, not exit.
+noModulesTest :: TestTree
+noModulesTest = disable19650 $ testCase "Ghcid waits when nothing is loaded" $ freshDir $
+    withGhcid ["-cghci Main.hs", "--restart=Main.hs"] $ \require -> do
+        require ["can't find"]
+        write "Main.hs" "main = print 1"
+        require [allGoodMessage]
+
+-- | A command that dies at startup must wait for a change, not exit.
+brokenStartupTest :: TestTree
+brokenStartupTest = testCase "Ghcid Cabal waits when the command fails at startup" $ inCabalSandbox $ do
+    orig <- readFile' "bar.cabal"
+    write "bar.cabal" "garbage that is not a cabal file"
+    withGhcid [] $ \require -> do
+        require ["exited unexpectedly"]
+        write "bar.cabal" orig
         require [allGoodMessage]
