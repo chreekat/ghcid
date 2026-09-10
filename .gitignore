@@ -17,3 +17,7 @@ ghcid.txt
 .DS_Store
 .env
 __pycache__
+
+result
+result-*
+.direnv/

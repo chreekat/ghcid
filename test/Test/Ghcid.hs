@@ -36,6 +36,9 @@ ghcidTest = localOption (mkTimeout 30000000) $ testGroup "Ghcid test"
     ,dotGhciTest
     ,loadConfigRestartFilterTest
     ,cabalTest
+    ,cabalRestartTest
+    ,noModulesTest
+    ,brokenStartupTest
     ]
 
 
@@ -205,18 +208,48 @@ loadConfigRestartFilterTest = testCase "Ignore generated cabal script setcwd.ghc
     shouldWatchLoadConfig "foo/.ghci" @?= True
 
 
-cabalTest :: TestTree
-cabalTest = testCase "Ghcid Cabal" $ copyDir "test/bar" $ whenExecutable "cabal" $ do
+-- | Run in a copy of test/bar with cabal configured for the ambient package-db.
+inCabalSandbox :: IO a -> IO ()
+inCabalSandbox act = copyDir "test/bar" $ whenExecutable "cabal" $ do
     env <- getEnvironment
     let db = ["--package-db=" ++ x | x <- maybe [] splitSearchPath $ lookup "GHC_PACKAGE_PATH" env]
     (_, _, _, pid) <- createProcess $
          (proc "cabal" $ "configure":db){env = Just $ filter ((/=) "GHC_PACKAGE_PATH" . fst) env}
     ExitSuccess <- waitForProcess pid
+    void act
 
+cabalTest :: TestTree
+cabalTest = testCase "Ghcid Cabal" $ inCabalSandbox $
     withGhcid [] $ \require -> do
         require [allGoodMessage]
         orig <- readFile' "src/Literate.lhs"
         append "src/Literate.lhs" "> x"
         require ["src/Literate.lhs:5:3","Parse error:"]
         write "src/Literate.lhs" orig
+        require [allGoodMessage]
+
+-- | A .cabal change must restart ghcid even under a user-supplied --command.
+cabalRestartTest :: TestTree
+cabalRestartTest = testCase "Ghcid Cabal restart with custom command" $ inCabalSandbox $
+    withGhcid ["-ccabal repl"] $ \require -> do
+        require [allGoodMessage]
+        append "bar.cabal" "\n-- touched by test\n"
+        require [allGoodMessage]
+
+-- | Zero loaded modules must wait for a change, not exit.
+noModulesTest :: TestTree
+noModulesTest = disable19650 $ testCase "Ghcid waits when nothing is loaded" $ freshDir $
+    withGhcid ["-cghci Main.hs", "--restart=Main.hs"] $ \require -> do
+        require ["can't find"]
+        write "Main.hs" "main = print 1"
+        require [allGoodMessage]
+
+-- | A command that dies at startup must wait for a change, not exit.
+brokenStartupTest :: TestTree
+brokenStartupTest = testCase "Ghcid Cabal waits when the command fails at startup" $ inCabalSandbox $ do
+    orig <- readFile' "bar.cabal"
+    write "bar.cabal" "garbage that is not a cabal file"
+    withGhcid [] $ \require -> do
+        require ["exited unexpectedly"]
+        write "bar.cabal" orig
         require [allGoodMessage]

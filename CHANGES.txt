@@ -1,5 +1,13 @@
 Changelog for ghcid (* = breaking change)
 
+Unreleased
+    Restart on .cabal, cabal.project and stack.yaml changes even with
+        a custom --command
+    Wait for a change instead of exiting when nothing is loaded or the
+        command fails at startup
+    *Auto cabal repl uses --builddir=dist-newstyle/ghcid,
+        --enable-multi-repl all, and faster session flags on modern GHCs
+
 1.0.0, released 2026-08-18
     #397, #399, #400, promptly clean up entire process groups and force
         termination when GHCi is unresponsive

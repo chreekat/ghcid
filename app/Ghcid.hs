@@ -2,7 +2,10 @@
 {-# OPTIONS_GHC -fno-cse #-}
 
 -- | The application entry point
-module Ghcid(main, mainWithTerminal, TermSize(..), WordWrap(..), shouldWatchLoadConfig) where
+module Ghcid(
+    main, mainWithTerminal, TermSize(..), WordWrap(..), shouldWatchLoadConfig,
+    Options(..), ColorMode(..), ProjectProbe(..), autoCommand
+    ) where
 
 import Control.Exception
 import System.IO.Error
@@ -12,7 +15,7 @@ import Data.List.Extra
 import Data.Maybe
 import Data.Ord
 import Data.Tuple.Extra
-import Data.Version
+import Data.Version.Extra
 import Session
 import Server
 import qualified System.Console.Terminal.Size as Term
@@ -98,7 +101,7 @@ options = cmdArgsMode $ Options
     ,topmost = False &= name "t" &= help "Set window topmost (Windows only)"
     ,no_title = False &= help "Don't update the shell title/icon"
     ,project = "" &= typ "NAME" &= help "Name of the project, defaults to current directory"
-    ,restart = [] &= typ "PATH" &= help "Restart the command when the given file or directory contents change (defaults to .ghci and any .cabal file, unless when using stack or a custom command)"
+    ,restart = [] &= typ "PATH" &= help "Restart the command when the given file or directory contents change (defaults to .ghci, stack.yaml, cabal.project and any .cabal file)"
     ,reload = [] &= typ "PATH" &= help "Reload when the given file or directory contents change (defaults to none)"
     ,directory = "." &= typDir &= name "C" &= help "Set the current directory"
     ,outputfile = [] &= typFile &= name "o" &= help "File to write the full output to"
@@ -107,7 +110,7 @@ options = cmdArgsMode $ Options
     ,max_messages = Nothing &= name "n" &= help "Maximum number of messages to print"
     ,color = Auto &= name "colour" &= name "color" &= opt Always &= typ "always/never/auto" &= help "Color output (defaults to when the terminal supports it)"
     ,setup = [] &= name "setup" &= typ "COMMAND" &= help "Setup commands to pass to ghci on stdin, usually :set <something>"
-    ,no_cabal_repl_rtsopts = False &= explicit &= name "no-cabal-repl-rtsopts" &= help "Disable default +RTS -N -RTS when using the auto-selected cabal repl command"
+    ,no_cabal_repl_rtsopts = False &= explicit &= name "no-cabal-repl-rtsopts" &= help "Disable default +RTS -N -A64m -RTS when using the auto-selected cabal repl command"
     ,allow_eval = False &= name "allow-eval" &= help "Execute REPL commands in comments"
     ,server = False &= explicit &= name "server" &= help "Enable the local ghcid socket server"
     ,target = [] &= typ "TARGET" &= help "Target Component to build (e.g. lib:foo for Cabal, foo:lib for Stack)"
@@ -139,44 +142,103 @@ Warnings:
 As a result, we prefer to give users full control with a .ghci file, if available
 -}
 autoOptions :: Options -> String -> IO Options
-autoOptions o@Options{..} ghciScript
-    | command /= "" = pure $ f [command] []
-    | otherwise = do
-        curdir <- getCurrentDirectory
-        files <- getDirectoryContents "."
+autoOptions o ghciScript = autoCommand o ghciScript <$> probeProject
 
-        -- use unsafePerformIO to get nicer pattern matching for logic (read-only operations)
-        let findStack dir = flip catchIOError (const $ pure Nothing) $ do
-                let yaml = dir </> "stack.yaml"
-                b <- doesFileExist yaml &&^ doesDirectoryExist (dir </> ".stack-work")
-                pure $ if b then Just yaml else Nothing
-        stackFile <- firstJustM findStack [".",".."] -- stack file might be parent, see #62
+-- | Facts about the project directory that determine the default command.
+data ProjectProbe = ProjectProbe
+    {probeCurdir :: FilePath -- ^ The current directory
+    ,probeStackYaml :: Maybe FilePath -- ^ stack.yaml, when the project builds with stack
+    ,probeCabalProject :: [FilePath] -- ^ The cabal.project files that exist in the current directory
+    ,probeCabalFiles :: [FilePath] -- ^ The project's .cabal files
+    ,probeDotGhci :: Bool -- ^ Whether @.ghci@ exists in the current directory
+    ,probeGhcVersion :: Maybe Version -- ^ The version of ghc on $PATH
+    ,probeCabalVersion :: Maybe Version -- ^ The version of cabal on $PATH
+    }
 
-        let cabal = map (curdir </>) $ filter ((==) ".cabal" . takeExtension) files
-        let isLib = isPrefixOf "lib:"  -- `lib:foo` is the Cabal format
-        let noCode = [ "-fno-code"
-                     | null test
-                       && null run
-                       && not allow_eval
-                       && (isJust stackFile || all isLib target) ]
-        let opts = noCode ++ ghciFlagsRequired ++ ghciFlagsUseful ++ ["-ghci-script=" ++ ghciScript]
-        pure $ case () of
-            _ | Just stack <- stackFile ->
-                let flags = if null arguments then
-                                "stack ghci" : target ++ "--test --bench" :
-                                ["--no-load" | ".ghci" `elem` files] ++
-                                map ("--ghci-options=" ++) opts
-                            else
-                                "stack exec --test --bench -- ghci" : opts
-                in f flags $ stack:cabal
-              | cabal /= [] ->
-                  let rtsopts = ["\"+RTS -N -RTS\"" | not no_cabal_repl_rtsopts]
-                      useCabal = ["cabal","repl"] ++ target ++ map ("--repl-options=" ++) (rtsopts ++ opts)
-                      useGhci = "cabal exec -- ghci":opts
-                  in  f (if null arguments then useCabal else useGhci) cabal
-              | ".ghci" `elem` files -> f ("ghci":opts) [curdir </> ".ghci"]
-              | otherwise -> f ("ghci":opts) []
+probeProject :: IO ProjectProbe
+probeProject = do
+    curdir <- getCurrentDirectory
+    files <- getDirectoryContents "."
+    let findStack dir = flip catchIOError (const $ pure Nothing) $ do
+            let yaml = dir </> "stack.yaml"
+            b <- doesFileExist yaml &&^ doesDirectoryExist (dir </> ".stack-work")
+            pure $ if b then Just yaml else Nothing
+    stackFile <- firstJustM findStack [".",".."] -- stack file might be parent, see #62
+    let cabalProject = [curdir </> x | x <- ["cabal.project","cabal.project.local"], x `elem` files]
+    cabalFiles <- if "cabal.project" `elem` files
+        then findCabalFiles curdir -- a cabal.project's packages may sit in subdirectories
+        else pure $ map (curdir </>) $ filter ((==) ".cabal" . takeExtension) files
+    -- Versions of the tools on $PATH. Best-effort: cabal may still pick
+    -- another ghc (with-compiler), so gate flags conservatively on these.
+    (ghcVersion, cabalVersion) <-
+        if isNothing stackFile && (cabalFiles /= [] || cabalProject /= [])
+            then (,) <$> probeVersion "ghc" <*> probeVersion "cabal"
+            else pure (Nothing, Nothing)
+    pure ProjectProbe
+        {probeCurdir = curdir
+        ,probeStackYaml = stackFile
+        ,probeCabalProject = cabalProject
+        ,probeCabalFiles = cabalFiles
+        ,probeDotGhci = ".ghci" `elem` files
+        ,probeGhcVersion = ghcVersion
+        ,probeCabalVersion = cabalVersion
+        }
+
+probeVersion :: String -> IO (Maybe Version)
+probeVersion exe = handle (\(_ :: SomeException) -> pure Nothing) $ do
+    out <- trim <$> readProcess exe ["--numeric-version"] ""
+    Just <$> evaluate (readVersion out)
+
+-- | All .cabal files under a directory, skipping dot and dist-newstyle directories.
+findCabalFiles :: FilePath -> IO [FilePath]
+findCabalFiles root = flip catchIOError (const $ pure []) $ do
+    (dirs, files) <- partitionM doesDirectoryExist =<< listContents root
+    let keep d = not $ any (`isPrefixOf` takeFileName d) [".", "dist-newstyle"]
+    rest <- concatMapM findCabalFiles $ filter keep dirs
+    pure $ filter ((==) ".cabal" . takeExtension) files ++ rest
+
+-- | Pick the command and restart set from the probed project shape.
+autoCommand :: Options -> String -> ProjectProbe -> Options
+autoCommand o@Options{..} ghciScript ProjectProbe{..}
+    | command /= "" = f [command] $ maybeToList probeStackYaml ++ probeCabalProject ++ probeCabalFiles
+    | Just stack <- probeStackYaml =
+        let flags = if null arguments then
+                        "stack ghci" : target ++ "--test --bench" :
+                        ["--no-load" | probeDotGhci] ++
+                        map ("--ghci-options=" ++) opts
+                    else
+                        "stack exec --test --bench -- ghci" : opts
+        in f flags $ stack:probeCabalFiles
+    | probeCabalFiles /= [] || probeCabalProject /= [] =
+        let rtsopts = ["\"+RTS -N -A64m -RTS\"" | not no_cabal_repl_rtsopts]
+            since v flag = [flag | probeGhcVersion >= Just (makeVersion v)]
+            multiRepl = probeCabalVersion >= Just (makeVersion [3,12])
+                     && probeGhcVersion >= Just (makeVersion [9,4])
+            extra = concat
+                [["-fbyte-code" | null noCode] -- tests/evals need code, but never object code
+                ,since [8,2] "-fno-hide-source-paths"
+                ,since [8,10] "-fdefer-diagnostics" -- group diagnostics after the parallel-load noise
+                ,since [9,6] "-fprefer-byte-code" -- TH splices load byte-code deps, skipping codegen
+                ,since [9,6] "-fwrite-if-simplified-core" -- restart from interfaces, not source
+                ,since [9,8] "-fno-break-points" -- no debugger under ghcid; skip breakpoint ticks
+                ]
+            -- A separate builddir keeps repl artifacts from competing with `cabal build`.
+            useCabal = ["cabal","repl","--builddir=dist-newstyle/ghcid"]
+                ++ (if multiRepl then "--enable-multi-repl" : ["all" | null target] else [])
+                ++ target
+                ++ map ("--repl-options=" ++) (rtsopts ++ extra ++ opts)
+            useGhci = "cabal exec -- ghci":opts
+        in  f (if null arguments then useCabal else useGhci) $ probeCabalProject ++ probeCabalFiles
+    | probeDotGhci = f ("ghci":opts) [probeCurdir </> ".ghci"]
+    | otherwise = f ("ghci":opts) []
     where
+        isLib = isPrefixOf "lib:"  -- `lib:foo` is the Cabal format
+        noCode = [ "-fno-code"
+                 | null test
+                   && null run
+                   && not allow_eval
+                   && (isJust probeStackYaml || all isLib target) ]
+        opts = noCode ++ ghciFlagsRequired ++ ghciFlagsUseful ++ ["-ghci-script=" ++ ghciScript]
         f c r = o{command = unwords $ c ++ map escape arguments, arguments = [], restart = restart ++ r, run = [], test = run ++ test}
 
 -- | Simple escaping for command line arguments. Wraps a string in double quotes if it contains a space.
@@ -283,8 +345,18 @@ mainWithTerminal termSize termOutput = do
                     then (clearScreen *>)
                     else id
 
+                let output = clear . termOutput . restyle
                 maybe withWaiterNotify withWaiterPoll (poll opts) $ \waiter ->
-                    runGhcid (if allow_eval opts then enableEval session else session) waiter termSize (clear . termOutput . restyle) opts serverEnv
+                    runGhcid (if allow_eval opts then enableEval session else session) waiter termSize output opts serverEnv
+                        `catch` \(UnexpectedExit cmd _ mmsg) -> do
+                            -- A dead session (e.g. a broken .cabal file) can only be
+                            -- restarted, so sit out the broken state until a change.
+                            output $ ["Command \"" ++ cmd ++ "\" exited unexpectedly"]
+                                ++ maybeToList mmsg
+                                ++ ["Waiting for changes that will restart ghcid."]
+                            nextWait <- waitFiles waiter
+                            void $ nextWait $ map (,()) $ restart opts ++ reload opts
+                            pure Continue
         )
 
 
@@ -352,11 +424,6 @@ runGhcid session waiter termSize termOutput opts@Options{..} serverEnv = do
     (messages, loaded) <- sessionStart session command $
         map (":set " ++) ghciFlagsUseful ++ setup
 
-    when (null loaded && not ignoreLoaded) $ do
-        logErr "No files loaded, meaning ghcid will never refresh, so aborting."
-        logErr $ "Command: " ++ command
-        exitFailure
-
     -- Update server with initial messages
     mapM_ (`updateMessages` messages) serverEnv
 
@@ -415,10 +482,20 @@ runGhcid session waiter termSize termOutput opts@Options{..} serverEnv = do
                         showJSON [("loaded",map jString loaded),("messages",map jMessage $ filter isMessage messages)]
                     else
                         unlines $ map unescape $ prettyOutput currTime loadedCount (limitMessages ordMessages) evals
-            when (null loaded && not ignoreLoaded) $ do
+            if null loaded && not ignoreLoaded then
+              if null $ restart ++ reload then do
                 logErr "No files loaded, nothing to wait for. Fix the last error and restart."
                 exitFailure
-            whenJust test $ \t -> do
+              else do
+                -- Nothing to reload, so any change gets a fresh start.
+                logErr "No files loaded, waiting for changes that will restart ghcid."
+                reason <- nextWait $ map (,Restart) $ restart ++ reload
+                currTime <- getShortTime
+                let reason2 = either pure (map fst) reason
+                unless no_status $ outputFill currTime Nothing evals $ "Restarting..." : map ("  " ++) reason2
+                pure Continue
+            else do
+              whenJust test $ \t -> do
                 logDebug $ "TESTING: " ++ t
                 sessionExecAsync session t $ \stderr -> do
                     logDebug "TESTING: Completed"
@@ -429,7 +506,7 @@ runGhcid session waiter termSize termOutput opts@Options{..} serverEnv = do
                      else do
                         updateTitle "(test done)"
                         whenNormal $ outStrLn "\n...done"
-            whenJust lint $ \lintcmd ->
+              whenJust lint $ \lintcmd ->
                 unless hasErrors $ do
                     (exitcode, stdout, stderr) <- readCreateProcessWithExitCode (shell . unwords $ lintcmd : map escape touched) ""
                     unless (exitcode == ExitSuccess) $ do
@@ -437,35 +514,35 @@ runGhcid session waiter termSize termOutput opts@Options{..} serverEnv = do
                         outStrLn output
                         forM_ outputfile $ flip writeFile output
 
-            reason <- nextWait $ map (,Restart) restart
-                              ++ map (,Reload) reload
-                              ++ map (,Reload) loaded
+              reason <- nextWait $ map (,Restart) restart
+                                ++ map (,Reload) reload
+                                ++ map (,Reload) loaded
 
-            let reason1 = case reason of
-                  Left err ->
-                    (Reload, ["Error when waiting, if this happens repeatedly, raise a ghcid bug.", err])
-                  Right files ->
-                    case partition (\(f, mode) -> mode == Reload) files of
-                      -- Prefer restarts over reloads. E.g., in case of both '--reload=dir'
-                      -- and '--restart=dir', ghcid would restart instead of reload.
-                      (_, rs@(_:_)) -> (Restart, map fst rs)
-                      (rl, _) -> (Reload, map fst rl)
+              let reason1 = case reason of
+                    Left err ->
+                      (Reload, ["Error when waiting, if this happens repeatedly, raise a ghcid bug.", err])
+                    Right files ->
+                      case partition (\(f, mode) -> mode == Reload) files of
+                        -- Prefer restarts over reloads. E.g., in case of both '--reload=dir'
+                        -- and '--restart=dir', ghcid would restart instead of reload.
+                        (_, rs@(_:_)) -> (Restart, map fst rs)
+                        (rl, _) -> (Reload, map fst rl)
 
-            currTime <- getShortTime
-            case reason1 of
-              (Reload, reason2) -> do
-                unless no_status $ outputFill currTime Nothing evals $ "Reloading..." : map ("  " ++) reason2
-                mapM_ setReloading serverEnv
-                nextWait <- waitFiles waiter
-                reloadResult <- sessionReload session
-                mapM_ clearReloading serverEnv
-                let (msgs, _, _) = reloadResult
-                mapM_ (`updateMessages` msgs) serverEnv
-                fire nextWait reloadResult
-              (Restart, reason2) -> do
-                -- exit cleanly, since the whole thing is wrapped in a forever
-                unless no_status $ outputFill currTime Nothing evals $ "Restarting..." : map ("  " ++) reason2
-                pure Continue
+              currTime <- getShortTime
+              case reason1 of
+                (Reload, reason2) -> do
+                  unless no_status $ outputFill currTime Nothing evals $ "Reloading..." : map ("  " ++) reason2
+                  mapM_ setReloading serverEnv
+                  nextWait <- waitFiles waiter
+                  reloadResult <- sessionReload session
+                  mapM_ clearReloading serverEnv
+                  let (msgs, _, _) = reloadResult
+                  mapM_ (`updateMessages` msgs) serverEnv
+                  fire nextWait reloadResult
+                (Restart, reason2) -> do
+                  -- exit cleanly, since the whole thing is wrapped in a forever
+                  unless no_status $ outputFill currTime Nothing evals $ "Restarting..." : map ("  " ++) reason2
+                  pure Continue
 
     fire nextWait (messages, loaded, loaded)
 
