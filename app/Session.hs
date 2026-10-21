@@ -3,7 +3,7 @@
 -- | A persistent version of the Ghci session, encoding lots of semantics on top.
 --   Not suitable for calling multithreaded.
 module Session(
-    Session, PathMode(..), enableEval, withSession,
+    Session, PathMode(..), StartupFailed(..), enableEval, withSession,
     sessionStart, sessionReload,
     sessionExecAsync, sessionExec, sessionCurrentDir, sessionPathMode,
     ) where
@@ -38,6 +38,15 @@ data Session = Session
     ,withThread :: ThreadId -- ^ Thread that called withSession
     ,allowEval :: Bool  -- ^ Is the allow-eval flag set?
     }
+
+-- | The command exited before its session was ready.
+data StartupFailed = StartupFailed
+    {startupError :: GhciError
+    ,startupOutput :: [String] -- ^ Everything the command printed, oldest first
+    }
+    deriving Show
+
+instance Exception StartupFailed
 
 data PathMode = PathRelative | PathAbsolute | PathUnknown
     deriving (Eq, Show)
@@ -110,23 +119,29 @@ sessionStart Session{..} cmd setup = do
 
     -- start the new
     logInfo $ "Starting ghci command: " ++ cmd
-    (v, messages) <- mask $ \unmask -> do
-        (v, messages) <- unmask $ startGhci cmd Nothing $ \_ msg -> whenNormal $ outStrLn msg
-        writeIORef ghci $ Just v
-        pure (v, messages)
+    transcript <- newIORef []
+    let echo _ msg = do
+            modifyIORef' transcript (msg:)
+            whenNormal $ outStrLn msg
+    (v, messages, dir, loaded, evals) <- handle (\e -> throwIO . StartupFailed e . reverse =<< readIORef transcript) $ do
+        (v, messages) <- mask $ \unmask -> do
+            (v, messages) <- unmask $ startGhci cmd Nothing echo
+            writeIORef ghci $ Just v
+            pure (v, messages)
 
-    -- do whatever preparation was requested
-    exec v $ unlines setup
+        -- do whatever preparation was requested
+        exec v $ unlines setup
 
-    -- deal with current directory
-    (dir, _) <- showPaths v
-    moduleFiles <- map snd <$> showModules v
-    writeIORef curdir dir
-    writeIORef pathMode $ determinePathMode moduleFiles
-    messages <- pure $ map (qualify dir) messages
+        -- deal with current directory
+        (dir, _) <- showPaths v
+        moduleFiles <- map snd <$> showModules v
+        writeIORef curdir dir
+        writeIORef pathMode $ determinePathMode moduleFiles
+        messages <- pure $ map (qualify dir) messages
 
-    let loaded = loadedModules dir messages
-    evals <- performEvals v allowEval loaded
+        let loaded = loadedModules dir messages
+        evals <- performEvals v allowEval loaded
+        pure (v, messages, dir, loaded, evals)
 
     -- install a handler
     forkIO $ do

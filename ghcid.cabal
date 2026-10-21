@@ -83,6 +83,7 @@ executable ghcid
         Language.Haskell.Ghcid.Types
         Language.Haskell.Ghcid.Util
         Language.Haskell.Ghcid
+        OutputFile
         Paths_ghcid
         Server
         Session
@@ -128,6 +129,7 @@ test-suite ghcid_test
         Language.Haskell.Ghcid.Terminal
         Language.Haskell.Ghcid.Types
         Language.Haskell.Ghcid.Util
+        OutputFile
         Paths_ghcid
         Server
         Session

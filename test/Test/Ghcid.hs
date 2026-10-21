@@ -46,6 +46,7 @@ ghcidTest = localOption (mkTimeout 30000000) $ testGroup "Ghcid test"
     ,cabalRestartTest
     ,noModulesTest
     ,brokenStartupTest
+    ,brokenStartupOutputTest
 #if !defined(mingw32_HOST_OS)
     ,sigtermTest
 #endif
@@ -296,6 +297,20 @@ sigtermTest = testCase "Ghcid SIGTERM takes a busy GHCi down with it" $ freshDir
                 pollUntil 10 "ghcid leaked its GHCi child" $ not <$> ghciAlive
 #endif
 
+-- | Wait for a file to satisfy a predicate, failing after a deadline.
+awaitFile :: FilePath -> (String -> Bool) -> IO String
+awaitFile file ok = do
+    res <- timeout 20 $ flip loopM () $ \() -> do
+        src <- ifM (doesFileExist file) (readFile' file) (pure "")
+        if ok src then pure $ Right src else do
+            sleep 0.05
+            pure $ Left ()
+    case res of
+        Just src -> pure src
+        Nothing -> do
+            src <- ifM (doesFileExist file) (readFile' file) (pure "<missing>")
+            assertFailure $ "Timed out waiting on " ++ file ++ ", last contents:\n" ++ src
+
 -- | A command that dies at startup must wait for a change, not exit.
 brokenStartupTest :: TestTree
 brokenStartupTest = testCase "Ghcid Cabal waits when the command fails at startup" $ inCabalSandbox $ do
@@ -305,3 +320,11 @@ brokenStartupTest = testCase "Ghcid Cabal waits when the command fails at startu
         require ["exited unexpectedly"]
         write "bar.cabal" orig
         require [allGoodMessage]
+
+brokenStartupOutputTest :: TestTree
+brokenStartupOutputTest = testCase "Output files carry the command's own error when it fails at startup" $ inCabalSandbox $ do
+    write "bar.cabal" "garbage that is not a cabal file"
+    withGhcid ["-oerrors.err", "-oerrors.json"] $ \_ -> do
+        let cabalError = "field missing"
+        void $ awaitFile "errors.err" (cabalError `isInfixOf`)
+        void $ awaitFile "errors.json" (cabalError `isInfixOf`)

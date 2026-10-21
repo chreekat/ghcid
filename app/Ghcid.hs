@@ -18,6 +18,7 @@ import Data.Ord
 import Data.Tuple.Extra
 import Data.Version.Extra
 import Session
+import OutputFile
 import Server
 import qualified System.Console.Terminal.Size as Term
 import System.Console.CmdArgs
@@ -348,17 +349,22 @@ mainWithTerminal termSize termOutput = do
                     else id
 
                 let output = clear . termOutput . restyle
-                maybe withWaiterNotify withWaiterPoll (poll opts) $ \waiter ->
-                    runGhcid (if allow_eval opts then enableEval session else session) waiter termSize output opts serverEnv
-                        `catch` \(UnexpectedExit cmd _ mmsg) -> do
+                maybe withWaiterNotify withWaiterPoll (poll opts) $ \waiter -> do
+                    let exited (UnexpectedExit cmd _ mmsg) transcript = do
                             -- A dead session (e.g. a broken .cabal file) can only be
                             -- restarted, so sit out the broken state until a change.
+                            writeOutputFiles (outputfile opts) $ CommandFailed cmd transcript
                             output $ ["Command \"" ++ cmd ++ "\" exited unexpectedly"]
                                 ++ maybeToList mmsg
                                 ++ ["Waiting for changes that will restart ghcid."]
                             nextWait <- waitFiles waiter
                             void $ nextWait $ map (,()) $ restart opts ++ reload opts
                             pure Continue
+                    runGhcid (if allow_eval opts then enableEval session else session) waiter termSize output opts serverEnv
+                        `catches`
+                            [Handler $ \(StartupFailed e transcript) -> exited e transcript
+                            ,Handler $ \e -> exited e $ maybeToList $ ghciErrorLastStdErr e
+                            ]
         )
 
 
@@ -478,12 +484,8 @@ runGhcid session waiter termSize termOutput opts@Options{..} serverEnv = do
                 pure $ (if reverse_errors then reverse else id) moduleSorted
 
             outputFill currTime (Just (loadedCount, ordMessages)) evals [test_message | isJust test]
-            forM_ outputfile $ \file ->
-                writeFile file $
-                    if takeExtension file == ".json" then
-                        showJSON [("loaded",map jString loaded),("messages",map jMessage $ filter isMessage messages)]
-                    else
-                        unlines $ map unescape $ prettyOutput currTime loadedCount (limitMessages ordMessages) evals
+            writeOutputFiles outputfile $ Loaded loaded messages $
+                map unescape $ prettyOutput currTime loadedCount (limitMessages ordMessages) evals
             if null loaded && not ignoreLoaded then
               if null $ restart ++ reload then do
                 logErr "No files loaded, nothing to wait for. Fix the last error and restart."
@@ -568,24 +570,3 @@ printEval (EvalResult file (line, col) msg result) =
         ]
     ] ++ map ("$> " ++) (lines msg)
       ++ lines result
-
-
-showJSON :: [(String, [String])] -> String
-showJSON xs = unlines $ concat $
-    [ ((if i == 0 then "{" else ",") ++ jString a ++ ":") :
-      ["  " ++ (if j == 0 then "[" else ",") ++ b | (j,b) <- zipFrom 0 bs] ++
-      [if null bs then "  []" else "  ]"]
-    | (i,(a,bs)) <- zipFrom 0 xs] ++
-    [["}"]]
-
-jString x = "\"" ++ escapeJSON x ++ "\""
-
-jMessage Message{..} = jDict $
-    [("severity",jString $ show loadSeverity)
-    ,("file",jString loadFile)] ++
-    [("start",pair loadFilePos) | loadFilePos /= (0,0)] ++
-    [("end", pair loadFilePosEnd) | loadFilePos /= loadFilePosEnd] ++
-    [("message", jString $ intercalate "\n" loadMessage)]
-    where pair (a,b) = "[" ++ show a ++ "," ++ show b ++ "]"
-
-jDict xs = "{" ++ intercalate ", " [jString a ++ ":" ++ b | (a,b) <- xs] ++ "}"
