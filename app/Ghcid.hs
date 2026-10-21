@@ -291,6 +291,9 @@ mainWithTerminal :: IO TermSize -> ([String] -> IO ()) -> IO ()
 mainWithTerminal termSize termOutput = do
     installFatalSignalHandlers =<< myThreadId
     opts <- withGhcidArgs $ cmdArgsRun options
+    -- Relative output files live in --directory, wherever ghcid writes them from
+    outputs <- mapM (makeAbsolute . (directory opts </>)) $ outputfile opts
+    opts <- pure opts{outputfile = outputs}
     logDebug $ "OS: " ++ os
     logDebug $ "ARCH: " ++ arch
     logDebug $ "VERSION: " ++ showVersion version

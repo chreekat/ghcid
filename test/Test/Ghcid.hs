@@ -47,6 +47,7 @@ ghcidTest = localOption (mkTimeout 30000000) $ testGroup "Ghcid test"
     ,noModulesTest
     ,brokenStartupTest
     ,brokenStartupOutputTest
+    ,outputDirectoryTest
 #if !defined(mingw32_HOST_OS)
     ,sigtermTest
 #endif
@@ -328,3 +329,12 @@ brokenStartupOutputTest = testCase "Output files carry the command's own error w
         let cabalError = "field missing"
         void $ awaitFile "errors.err" (cabalError `isInfixOf`)
         void $ awaitFile "errors.json" (cabalError `isInfixOf`)
+
+outputDirectoryTest :: TestTree
+outputDirectoryTest = disable19650 $ testCase "Output files stay under --directory when ghcid stops" $ freshDir $ do
+    write "foo/Main.hs" "main = print 1"
+    withGhcid ["-Cfoo", "-cghci Main.hs", "-oerrors.err"] $ \require ->
+        require [allGoodMessage]
+    stopped <- readFile' "foo/errors.err"
+    assertBool ("Expected a stopped report, got " ++ stopped) $ "Ghcid has stopped." `isInfixOf` stopped
+    doesFileExist "errors.err" >>= assertBool "errors.err written outside --directory" . not
