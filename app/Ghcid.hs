@@ -359,7 +359,7 @@ mainWithTerminal termSize termOutput = do
                     else id
 
                 let output = clear . termOutput . restyle
-                maybe withWaiterNotify withWaiterPoll (poll opts) $ \waiter ->
+                maybe (withWaiterNotify auditPeriod) withWaiterPoll (poll opts) $ \waiter ->
                     runGhcid (if allow_eval opts then enableEval session else session) waiter termSize output opts serverEnv
                         `catch` \(UnexpectedExit cmd _ mmsg) -> do
                             -- A dead session (e.g. a broken .cabal file) can only be
@@ -367,7 +367,7 @@ mainWithTerminal termSize termOutput = do
                             output $ ["Command \"" ++ cmd ++ "\" exited unexpectedly"]
                                 ++ maybeToList mmsg
                                 ++ ["Waiting for changes that will restart ghcid."]
-                            nextWait <- waitFiles waiter
+                            nextWait <- waitFilesReporting waiter
                             void $ nextWait $ map (,()) $ restart opts ++ reload opts
                             pure Continue
         )
@@ -387,6 +387,22 @@ main = mainWithTerminal termSize termOutput
             outStr $ concatMap ('\n':) xs
             hFlush stdout -- must flush, since we don't finish with a newline
 
+
+-- | Seconds without a file notification after which the watched files are checked anyway.
+auditPeriod :: Seconds
+auditPeriod = 5
+
+-- | Like 'waitFiles', but loudly reporting changes the file watcher missed.
+waitFilesReporting :: Ord a => Waiter -> IO ([(FilePath, a)] -> IO (Either String [(FilePath, a)]))
+waitFilesReporting waiter = do
+    nextWait <- waitFiles waiter
+    pure $ \files -> do
+        res <- nextWait files
+        whenJust (either (const Nothing) Just res) $ \(detection, xs) ->
+            when (detection == Missed) $ logErr $
+                "The file watcher missed changes to " ++ unwords (nubOrd $ map fst xs) ++
+                ", found by checking the files anyway; it has been restarted."
+        pure $ snd <$> res
 
 data Continue = Continue
 
@@ -433,7 +449,7 @@ runGhcid session waiter termSize termOutput opts@Options{..} serverEnv = do
         logErr "--reload must be set when using --ignore-loaded"
         exitFailure
 
-    nextWait <- waitFiles waiter
+    nextWait <- waitFilesReporting waiter
     (messages, loaded) <- sessionStart session command $
         map (":set " ++) ghciFlagsUseful ++ setup
 
@@ -546,7 +562,7 @@ runGhcid session waiter termSize termOutput opts@Options{..} serverEnv = do
                 (Reload, reason2) -> do
                   unless no_status $ outputFill currTime Nothing evals $ "Reloading..." : map ("  " ++) reason2
                   mapM_ setReloading serverEnv
-                  nextWait <- waitFiles waiter
+                  nextWait <- waitFilesReporting waiter
                   reloadResult <- sessionReload session
                   mapM_ clearReloading serverEnv
                   let (msgs, _, _) = reloadResult

@@ -20,6 +20,7 @@ import System.Exit
 #if !defined(mingw32_HOST_OS)
 import Text.Read
 import System.IO.Error
+import System.Posix.Files (createLink)
 import System.Posix.Signals
 import System.Posix.Types
 #endif
@@ -49,6 +50,7 @@ ghcidTest = localOption (mkTimeout 30000000) $ testGroup "Ghcid test"
     ,brokenStartupTest
 #if !defined(mingw32_HOST_OS)
     ,sigtermTest
+    ,missedChangeTest
 #endif
     ]
 
@@ -303,6 +305,19 @@ sigtermTest = testCase "Ghcid SIGTERM takes a busy GHCi down with it" $ freshDir
                 terminateProcess ghcid
                 void $ waitForProcess ghcid
                 pollUntil 10 "ghcid leaked its GHCi child" $ not <$> ghciAlive
+#endif
+
+#if !defined(mingw32_HOST_OS)
+missedChangeTest :: TestTree
+missedChangeTest = disable19650 $ testCase "Ghcid reloads on a change its file watcher missed" $ freshDir $ do
+    write "Main.hs" "main = print 1"
+    createDirectory "elsewhere"
+    -- a write through an unwatched hard link raises no notification where Main.hs is watched
+    createLink "Main.hs" "elsewhere/Main.hs"
+    withGhcid ["-cghci Main.hs"] $ \require -> do
+        require [allGoodMessage]
+        writeFile "elsewhere/Main.hs" "x"
+        require ["Main.hs:1:1"," Parse error:"]
 #endif
 
 -- | A command that dies at startup must wait for a change, not exit.
