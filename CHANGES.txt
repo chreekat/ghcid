@@ -14,6 +14,8 @@ Unreleased
     Output files show the command's own output when it fails at startup
     JSON output files stay valid JSON when ghcid stops or lint fails
     Write the stopped message to output files relative to --directory
+    Restarting while a --test runs no longer reports the replaced GHCi
+        as exited and waits for a change instead of loading
 
 1.0.0, released 2026-08-18
     #397, #399, #400, promptly clean up entire process groups and force
