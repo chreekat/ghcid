@@ -14,6 +14,12 @@ Unreleased
     Output files show the command's own output when it fails at startup
     JSON output files stay valid JSON when ghcid stops or lint fails
     Write the stopped message to output files relative to --directory
+    Output files say why ghcid stopped, when it stopped itself
+    *Refuse --restart and --reload paths that do not exist
+    Keep watching a directory that is replaced at the same path, e.g. by
+        a git checkout
+    Check watched files after 5s without a notification, and report and
+        restart the file watcher if it missed a change
 
 1.0.0, released 2026-08-18
     #397, #399, #400, promptly clean up entire process groups and force
