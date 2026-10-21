@@ -45,6 +45,7 @@ ghcidTest = localOption (mkTimeout 30000000) $ testGroup "Ghcid test"
     ,cabalTest
     ,cabalRestartTest
     ,noModulesTest
+    ,missingWatchPathTest
     ,brokenStartupTest
 #if !defined(mingw32_HOST_OS)
     ,sigtermTest
@@ -249,10 +250,18 @@ cabalRestartTest = testCase "Ghcid Cabal restart with custom command" $ inCabalS
 -- | Zero loaded modules must wait for a change, not exit.
 noModulesTest :: TestTree
 noModulesTest = disable19650 $ testCase "Ghcid waits when nothing is loaded" $ freshDir $
-    withGhcid ["-cghci Main.hs", "--restart=Main.hs"] $ \require -> do
+    withGhcid ["-cghci Main.hs", "--restart=."] $ \require -> do
         require ["can't find"]
         write "Main.hs" "main = print 1"
         require [allGoodMessage]
+
+missingWatchPathTest :: TestTree
+missingWatchPathTest = testCase "Ghcid refuses a --restart or --reload path that does not exist" $ freshDir $ do
+    write "Main.hs" "main = print 1"
+    forM_ ["--restart=typo.cabal", "--reload=typo.txt"] $ \flag -> do
+        res <- timeout 20 $ try $ withArgs ["--quiet", "--no-title", "-cghci Main.hs", flag] $
+            mainWithTerminal (pure $ TermSize 100 (Just 50) WrapHard) (const $ pure ())
+        res @?= Just (Left $ ExitFailure 1)
 
 #if !defined(mingw32_HOST_OS)
 sigtermTest :: TestTree

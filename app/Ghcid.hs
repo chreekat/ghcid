@@ -279,6 +279,13 @@ handleErrors = handle $ \(UnexpectedExit cmd _ mmsg) -> do
         Nothing -> ""
     exitFailure
 
+-- | A complaint naming each user-given @--restart@ and @--reload@ path that does not exist.
+missingWatchPaths :: Options -> IO [String]
+missingWatchPaths Options{..} =
+    concatForM [("--restart", restart), ("--reload", reload)] $ \(flag, paths) ->
+        fmap (\path -> flag ++ " path does not exist: " ++ path) <$>
+            filterM (notM . doesPathExist . (directory </>)) paths
+
 printStopped :: Options -> IO ()
 printStopped opts =
     forM_ (outputfile opts) $ \file -> do
@@ -300,7 +307,11 @@ mainWithTerminal termSize termOutput = do
           | server opts = withServer (act . Just)
           | otherwise = act Nothing
 
-    flip finally (printStopped opts) $ withServerMaybe (\serverEnv -> handleErrors $
+    flip finally (printStopped opts) $ withServerMaybe (\serverEnv -> handleErrors $ do
+        missing <- missingWatchPaths opts
+        unless (null missing) $ do
+            logErr $ unlines missing
+            exitFailure
         forever $ withWindowIcon $ withSession $ \session -> do
             -- Update the server's session reference on each (re)start
             mapM_ (`updateSession` session) serverEnv
