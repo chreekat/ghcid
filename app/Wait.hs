@@ -123,8 +123,9 @@ waitFiles waiter = do
         case waiter of
             WaiterPoll t -> pure ()
             WaiterNotify n -> do
-                syncWatches n $ map fst files
+                -- See Note [Kick before sync]
                 void $ tryTakeMVar $ kick n
+                syncWatches n $ map fst files
         new <- mapM (getModTime . fst) files
         case [x | (x,Just t) <- zip files new, t > base] of
             [] -> Right <$> recheck files new
@@ -142,9 +143,10 @@ waitFiles waiter = do
                     -- read, not taken, so the kick outlives the race whichever side wins
                     woke <- race (readMVar kick) audit
                     logDebug $ "WAITING: " ++ either (const "Notify signaled") (const "Auditing") woke
-                    -- Any event may have reshaped the directories, e.g. created one on the way to a missing file
-                    syncWatches n $ map fst files
                     since <- tryTakeMVar kick
+                    -- Any event may have reshaped the directories, e.g. created one on the way to a missing file.
+                    -- See Note [Kick before sync]
+                    syncWatches n $ map fst files
                     pure $ if isJust since then pure Reported else confirmMissed n
             new <- mapM (getModTime . fst) files
             case [x | (x,t1,t2) <- zip3 files old new, t1 /= t2] of
@@ -163,6 +165,13 @@ waitFiles waiter = do
                             pure $ if null [x | (x, Just _, Nothing) <- zip3 files old new] then Just () else Nothing
                     (,xs) <$> detect
 
+
+-- Note [Kick before sync]
+-- ~~~~~~~~~~~~~~~~~~~~~~~
+-- A wait empties the kick before syncing the watches, never after: an event
+-- that arrives while the watches are synced may reshape the directories again
+-- (a new one on the way to a missing file needs a watch of its own), so it
+-- must stay in the kick and wake the next round, which syncs again.
 
 -- | Settle whether the audit found a change that no notification reported, allowing a
 --   second for one still in flight. Watches that missed a change cannot be trusted, so
