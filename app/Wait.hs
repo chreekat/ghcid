@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
 
@@ -7,7 +8,6 @@ module Wait(Waiter, withWaiterPoll, withWaiterNotify, waitFiles) where
 
 import Control.Concurrent.Extra
 import qualified Data.Map as Map
-import qualified Data.Set as Set
 import Control.Monad.Extra
 import Data.List.Extra
 import System.FilePath
@@ -18,11 +18,38 @@ import Data.String
 import System.Time.Extra
 import System.FSNotify
 import Language.Haskell.Ghcid.Util
+#if !defined(mingw32_HOST_OS)
+import System.Posix.Files
+import System.Posix.Types
+#endif
 
 
 data Waiter
   = WaiterPoll Seconds
-  | WaiterNotify WatchManager (MVar ()) (Var (Map.Map FilePath StopListening))
+  | WaiterNotify WatchManager (MVar ()) (Var (Map.Map FilePath Watch))
+
+-- | A watch on a directory, keyed by its canonical path.
+data Watch = Watch
+    {watchedId :: Maybe DirId -- ^ The directory that was at that path just before the watch was placed
+    ,stopWatch :: StopListening
+    }
+
+-- | What makes a directory the same directory, even when another takes over its path.
+#if defined(mingw32_HOST_OS)
+type DirId = ()
+#else
+type DirId = (DeviceID, FileID)
+#endif
+
+-- | The identity of the directory at a path, if there is one.
+dirId :: FilePath -> IO (Maybe DirId)
+#if defined(mingw32_HOST_OS)
+dirId dir = ifM (doesDirectoryExist dir) (pure $ Just ()) (pure Nothing)
+#else
+dirId dir = handle (\(_ :: IOError) -> pure Nothing) $ do
+    st <- getFileStatus dir
+    pure $ if isDirectory st then Just (deviceID st, fileID st) else Nothing
+#endif
 
 withWaiterPoll :: Seconds -> (Waiter -> IO a) -> IO a
 withWaiterPoll x f = f $ WaiterPoll x
@@ -72,15 +99,18 @@ waitFiles waiter = do
         case waiter of
             WaiterPoll t -> pure ()
             WaiterNotify manager kick mp -> do
-                dirs <- fmap Set.fromList $ mapM canonicalizePathSafe $ nubOrd $ map (takeDirectory . fst) files
+                dirs <- fmap Map.fromList $ forM (nubOrd $ map (takeDirectory . fst) files) $ \dir -> do
+                    dir <- canonicalizePathSafe dir
+                    (dir,) <$> dirId dir
                 modifyVar_ mp $ \mp -> do
-                    let (keep,del) = Map.partitionWithKey (\k v -> k `Set.member` dirs) mp
-                    sequence_ $ Map.elems del
-                    new <- forM (Set.toList $ dirs `Set.difference` Map.keysSet keep) $ \dir -> do
+                    -- A watch follows its directory, not the path, so rewatch a path whose directory was replaced
+                    let (keep,del) = Map.partitionWithKey (\k v -> Map.lookup k dirs == Just (watchedId v)) mp
+                    mapM_ stopWatch $ Map.elems del
+                    new <- forM (Map.toList $ dirs `Map.difference` keep) $ \(dir, i) -> do
                         can <- watchDir manager (fromString dir) (const True) $ \event -> do
                             logDebug $ "NOTIFY: " ++ show event
                             void $ tryPutMVar kick ()
-                        pure (dir, can)
+                        pure (dir, Watch i can)
                     let mp2 = keep `Map.union` Map.fromList new
                     logDebug $ "WAITING: " ++ unwords (Map.keys mp2)
                     pure mp2

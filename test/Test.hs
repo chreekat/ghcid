@@ -13,6 +13,7 @@ import Test.Parser
 import Test.Auto
 import Test.API
 import Test.Ghcid
+import Test.Wait
 
 main :: IO ()
 main = do
@@ -30,5 +31,6 @@ tests = localOption (NumThreads 1) $ testGroup "Tests"
     ,parserTests
     ,autoTests
     ,apiTests
+    ,waitTests
     ,ghcidTest
     ]

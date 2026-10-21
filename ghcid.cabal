@@ -137,4 +137,5 @@ test-suite ghcid_test
         Test.Ghcid
         Test.Parser
         Test.Util
+        Test.Wait
         Wait
