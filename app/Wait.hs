@@ -99,21 +99,7 @@ waitFiles waiter = do
         case waiter of
             WaiterPoll t -> pure ()
             WaiterNotify manager kick mp -> do
-                dirs <- fmap Map.fromList $ forM (nubOrd $ map (takeDirectory . fst) files) $ \dir -> do
-                    dir <- canonicalizePathSafe dir
-                    (dir,) <$> dirId dir
-                modifyVar_ mp $ \mp -> do
-                    -- A watch follows its directory, not the path, so rewatch a path whose directory was replaced
-                    let (keep,del) = Map.partitionWithKey (\k v -> Map.lookup k dirs == Just (watchedId v)) mp
-                    mapM_ stopWatch $ Map.elems del
-                    new <- forM (Map.toList $ dirs `Map.difference` keep) $ \(dir, i) -> do
-                        can <- watchDir manager (fromString dir) (const True) $ \event -> do
-                            logDebug $ "NOTIFY: " ++ show event
-                            void $ tryPutMVar kick ()
-                        pure (dir, Watch i can)
-                    let mp2 = keep `Map.union` Map.fromList new
-                    logDebug $ "WAITING: " ++ unwords (Map.keys mp2)
-                    pure mp2
+                syncWatches manager kick mp $ map fst files
                 void $ tryTakeMVar kick
         new <- mapM (getModTime . fst) files
         case [x | (x,Just t) <- zip files new, t > base] of
@@ -125,9 +111,12 @@ waitFiles waiter = do
             sleep 0.1
             case waiter of
                 WaiterPoll t -> sleep $ max 0 $ t - 0.1 -- subtract the initial 0.1 sleep from above
-                WaiterNotify _ kick _ -> do
+                WaiterNotify manager kick mp -> do
                     takeMVar kick
                     logDebug "WAITING: Notify signaled"
+                    -- Any event may have reshaped the directories, e.g. created one on the way to a missing file
+                    syncWatches manager kick mp $ map fst files
+                    void $ tryTakeMVar kick
             new <- mapM (getModTime . fst) files
             case [x | (x,t1,t2) <- zip3 files old new, t1 /= t2] of
                 [] -> recheck files new
@@ -145,6 +134,38 @@ waitFiles waiter = do
                             pure $ if null [x | (x, Just _, Nothing) <- zip3 files old new] then Just () else Nothing
                     pure xs
 
+
+-- | Watch exactly the directories holding the given paths, kicking the 'MVar' on any event.
+--   A path whose directory is missing is covered by its nearest existing ancestor.
+syncWatches :: WatchManager -> MVar () -> Var (Map.Map FilePath Watch) -> [FilePath] -> IO ()
+syncWatches manager kick mp files = do
+    dirs <- fmap Map.fromList $ forM (nubOrd $ map takeDirectory files) $ \dir -> do
+        dir <- nearestDir dir
+        (dir,) <$> dirId dir
+    modifyVar_ mp $ \mp -> do
+        -- A watch follows its directory, not the path, so rewatch a path whose directory was replaced
+        let (keep,del) = Map.partitionWithKey (\k v -> Map.lookup k dirs == Just (watchedId v)) mp
+        mapM_ (handle (\(_ :: IOError) -> pure ()) . stopWatch) $ Map.elems del
+        new <- forM (Map.toList $ dirs `Map.difference` keep) $ \(dir, i) -> do
+            res <- try $ watchDir manager (fromString dir) (const True) $ \event -> do
+                logDebug $ "NOTIFY: " ++ show event
+                void $ tryPutMVar kick ()
+            case res of
+                Right stop -> pure (dir, Watch i stop)
+                Left (e :: IOError) -> do
+                    -- recorded anyway, so the failure is retried only once the directory changes
+                    logErr $ "Cannot watch " ++ dir ++ " for changes: " ++ show e
+                    pure (dir, Watch i $ pure ())
+        let mp2 = keep `Map.union` Map.fromList new
+        logDebug $ "WAITING: " ++ unwords (Map.keys mp2)
+        pure mp2
+
+-- | The canonical form of the closest existing directory at or above the given one.
+nearestDir :: FilePath -> IO FilePath
+nearestDir dir = do
+    dir <- canonicalizePathSafe dir
+    let up = takeDirectory dir
+    ifM (doesDirectoryExist dir ||^ pure (up == dir)) (pure dir) (nearestDir up)
 
 canonicalizePathSafe :: FilePath -> IO FilePath
 canonicalizePathSafe x = canonicalizePath x `catch` \(_ :: IOError) -> pure x
