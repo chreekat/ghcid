@@ -48,6 +48,7 @@ ghcidTest = localOption (mkTimeout 30000000) $ testGroup "Ghcid test"
     ,brokenStartupTest
     ,brokenStartupOutputTest
     ,outputDirectoryTest
+    ,generationTest
 #if !defined(mingw32_HOST_OS)
     ,sigtermTest
 #endif
@@ -338,3 +339,17 @@ outputDirectoryTest = disable19650 $ testCase "Output files stay under --directo
     stopped <- readFile' "foo/errors.err"
     assertBool ("Expected a stopped report, got " ++ stopped) $ "Ghcid has stopped." `isInfixOf` stopped
     doesFileExist "errors.err" >>= assertBool "errors.err written outside --directory" . not
+
+generationTest :: TestTree
+generationTest = disable19650 $ testCase "Output files count load attempts across reloads and restarts" $ freshDir $ do
+    write "Main.hs" "main = print 1"
+    write "restart.txt" ""
+    withGhcid ["-cghci Main.hs", "--restart=restart.txt", "-oerrors.err"] $ \require -> do
+        require [allGoodMessage]
+        void $ awaitFile "errors.err" ("ghcid: generation=1 state=done " `isPrefixOf`)
+        write "Main.hs" "main = print 2"
+        require [allGoodMessage]
+        void $ awaitFile "errors.err" ("ghcid: generation=2 state=done " `isPrefixOf`)
+        write "restart.txt" "x"
+        require [allGoodMessage]
+        void $ awaitFile "errors.err" ("ghcid: generation=3 state=done " `isPrefixOf`)

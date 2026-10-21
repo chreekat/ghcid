@@ -137,6 +137,7 @@ test-suite ghcid_test
         Test.Auto
         Test.Common
         Test.Ghcid
+        Test.OutputFile
         Test.Parser
         Test.Util
         Wait

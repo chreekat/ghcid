@@ -280,11 +280,6 @@ handleErrors = handle $ \(UnexpectedExit cmd _ mmsg) -> do
         Nothing -> ""
     exitFailure
 
-printStopped :: Options -> IO ()
-printStopped opts =
-    forM_ (outputfile opts) $ \file -> do
-        writeFile file "Ghcid has stopped.\n"
-
 
 -- | Like 'main', but run with a fake terminal for testing
 mainWithTerminal :: IO TermSize -> ([String] -> IO ()) -> IO ()
@@ -304,7 +299,8 @@ mainWithTerminal termSize termOutput = do
           | server opts = withServer (act . Just)
           | otherwise = act Nothing
 
-    flip finally (printStopped opts) $ withServerMaybe (\serverEnv -> handleErrors $
+    outputs <- newOutputFiles $ outputfile opts
+    flip finally (outputStopped outputs) $ withServerMaybe (\serverEnv -> handleErrors $
         forever $ withWindowIcon $ withSession $ \session -> do
             -- Update the server's session reference on each (re)start
             mapM_ (`updateSession` session) serverEnv
@@ -356,14 +352,14 @@ mainWithTerminal termSize termOutput = do
                     let exited (UnexpectedExit cmd _ mmsg) transcript = do
                             -- A dead session (e.g. a broken .cabal file) can only be
                             -- restarted, so sit out the broken state until a change.
-                            writeOutputFiles (outputfile opts) $ CommandFailed cmd transcript
+                            outputFinished outputs $ CommandFailed cmd transcript
                             output $ ["Command \"" ++ cmd ++ "\" exited unexpectedly"]
                                 ++ maybeToList mmsg
                                 ++ ["Waiting for changes that will restart ghcid."]
                             nextWait <- waitFiles waiter
                             void $ nextWait $ map (,()) $ restart opts ++ reload opts
                             pure Continue
-                    runGhcid (if allow_eval opts then enableEval session else session) waiter termSize output opts serverEnv
+                    runGhcid (if allow_eval opts then enableEval session else session) waiter termSize output outputs opts serverEnv
                         `catches`
                             [Handler $ \(StartupFailed e transcript) -> exited e transcript
                             ,Handler $ \e -> exited e $ maybeToList $ ghciErrorLastStdErr e
@@ -392,8 +388,8 @@ data ReloadMode = Reload | Restart deriving (Show, Ord, Eq)
 
 -- If we return successfully, we restart the whole process
 -- Use Continue not () so that inadvertent exits don't restart
-runGhcid :: Session -> Waiter -> IO TermSize -> ([String] -> IO ()) -> Options -> Maybe ServerEnv -> IO Continue
-runGhcid session waiter termSize termOutput opts@Options{..} serverEnv = do
+runGhcid :: Session -> Waiter -> IO TermSize -> ([String] -> IO ()) -> OutputFiles -> Options -> Maybe ServerEnv -> IO Continue
+runGhcid session waiter termSize termOutput outputs opts@Options{..} serverEnv = do
     let limitMessages = maybe id (take . max 1) max_messages
 
     let outputFill :: String -> Maybe (Int, [Load]) -> [EvalResult] -> [String] -> IO ()
@@ -432,6 +428,7 @@ runGhcid session waiter termSize termOutput opts@Options{..} serverEnv = do
         exitFailure
 
     nextWait <- waitFiles waiter
+    outputLoading outputs -- See Note [Output file header]
     (messages, loaded) <- sessionStart session command $
         map (":set " ++) ghciFlagsUseful ++ setup
 
@@ -487,7 +484,7 @@ runGhcid session waiter termSize termOutput opts@Options{..} serverEnv = do
                 pure $ (if reverse_errors then reverse else id) moduleSorted
 
             outputFill currTime (Just (loadedCount, ordMessages)) evals [test_message | isJust test]
-            writeOutputFiles outputfile $ Loaded loaded messages $
+            outputFinished outputs $ Loaded loaded messages $
                 map unescape $ prettyOutput currTime loadedCount (limitMessages ordMessages) evals
             if null loaded && not ignoreLoaded then
               if null $ restart ++ reload then do
@@ -519,7 +516,7 @@ runGhcid session waiter termSize termOutput opts@Options{..} serverEnv = do
                     unless (exitcode == ExitSuccess) $ do
                         let output = stdout ++ stderr
                         outStrLn output
-                        forM_ outputfile $ flip writeFile output
+                        outputFinished outputs $ Loaded loaded messages $ lines output
 
               reason <- nextWait $ map (,Restart) restart
                                 ++ map (,Reload) reload
@@ -541,6 +538,7 @@ runGhcid session waiter termSize termOutput opts@Options{..} serverEnv = do
                   unless no_status $ outputFill currTime Nothing evals $ "Reloading..." : map ("  " ++) reason2
                   mapM_ setReloading serverEnv
                   nextWait <- waitFiles waiter
+                  outputLoading outputs -- See Note [Output file header]
                   reloadResult <- sessionReload session
                   mapM_ clearReloading serverEnv
                   let (msgs, _, _) = reloadResult

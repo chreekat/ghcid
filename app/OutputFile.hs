@@ -2,10 +2,13 @@
 
 -- | The files written by @--outputfile@.
 module OutputFile(
-    Outcome(..), Format(..), formatOf, renderOutcome, writeOutputFiles
+    Outcome(..), Status(..), Report(..), Format(..), formatOf, renderReport,
+    OutputFiles, newOutputFiles, outputLoading, outputFinished, outputStopped
     ) where
 
+import Data.IORef
 import Data.List.Extra
+import Data.Time
 import System.FilePath
 
 import Language.Haskell.Ghcid.Escape
@@ -37,17 +40,76 @@ formatOf file
     | takeExtension file == ".json" = JsonFormat
     | otherwise = TextFormat
 
-renderOutcome :: Format -> Outcome -> String
-renderOutcome TextFormat Loaded{..} = unlines outcomeText
-renderOutcome TextFormat CommandFailed{..} = unlines $
+-- Note [Output file header]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~
+-- Every write leads with a header whose meaning for pollers is documented in
+-- README.md, under "How do I read the output file from a script?". Its start
+-- time must be taken before GHCi reads the sources, or an edit made in between
+-- would look included when it is not; taking it just before keeps pollers
+-- from waiting on edits that were in fact included.
+--
+-- While an attempt runs, the files keep the previous outcome's body under a
+-- loading header, so editors keep their diagnostics until new ones arrive.
+-- The text header is one line that no GHC-style parser takes for a
+-- diagnostic, so readers of the body can ignore it.
+
+-- | Where the latest load attempt stands.
+data Status
+    = Running (Maybe Outcome) -- ^ Underway, holding the previous outcome, if any
+    | Finished Outcome
+    | Stopped -- ^ ghcid has exited
+
+-- | Everything one rewrite of the output files shows.
+data Report = Report
+    {reportGeneration :: Int -- ^ Counts load attempts, from 1
+    ,reportStarted :: UTCTime -- ^ When the attempt began
+    ,reportStatus :: Status
+    }
+
+stateName :: Status -> String
+stateName Running{} = "loading"
+stateName (Finished Loaded{}) = "done"
+stateName (Finished CommandFailed{}) = "failed"
+stateName Stopped = "stopped"
+
+-- | The contents of an output file. See Note [Output file header]
+renderReport :: Format -> Report -> String
+renderReport TextFormat Report{..} = unlines $
+    unwords
+        ["ghcid:"
+        ,"generation=" ++ show reportGeneration
+        ,"state=" ++ stateName reportStatus
+        -- ISO 8601 basic format, since quickfix reads a colon and digits as a location
+        ,"started=" ++ formatTime defaultTimeLocale "%Y%m%dT%H%M%S%9QZ" reportStarted
+        ] :
+    case reportStatus of
+        Running outcome -> maybe [] textBody outcome
+        Finished outcome -> textBody outcome
+        Stopped -> ["Ghcid has stopped."]
+renderReport JsonFormat Report{..} = showJSON $
+    [("generation", JScalar $ show reportGeneration)
+    ,("state", JScalar $ jString $ stateName reportStatus)
+    ,("started", JScalar $ jString $ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%9QZ" reportStarted)
+    ] ++
+    case reportStatus of
+        Running outcome -> maybe nothingLoaded jsonFields outcome
+        Finished outcome -> jsonFields outcome
+        Stopped -> nothingLoaded
+    where nothingLoaded = [("loaded", JArray []), ("messages", JArray [])]
+
+textBody :: Outcome -> [String]
+textBody Loaded{..} = outcomeText
+textBody CommandFailed{..} =
     ["Command \"" ++ outcomeCommand ++ "\" exited unexpectedly"
     ,"Waiting for changes that will restart ghcid."
     ] ++ map unescape outcomeOutput
-renderOutcome JsonFormat Loaded{..} = showJSON
+
+jsonFields :: Outcome -> [(String, JValue)]
+jsonFields Loaded{..} =
     [("loaded", JArray $ map jString outcomeLoaded)
     ,("messages", JArray $ jMessages outcomeMessages)
     ]
-renderOutcome JsonFormat CommandFailed{..} = showJSON
+jsonFields CommandFailed{..} =
     [("command", JScalar $ jString outcomeCommand)
     ,("output", JArray $ map (jString . unescape) outcomeOutput)
     ,("loaded", JArray [])
@@ -55,9 +117,35 @@ renderOutcome JsonFormat CommandFailed{..} = showJSON
     ,("messages", JArray $ jMessages $ parseLoad outcomeOutput)
     ]
 
-writeOutputFiles :: [FilePath] -> Outcome -> IO ()
-writeOutputFiles files outcome =
-    mapM_ (\file -> writeFile file $ renderOutcome (formatOf file) outcome) files
+
+-- | The output files, and the report they show.
+data OutputFiles = OutputFiles [FilePath] (IORef Report)
+
+-- | Before the first load attempt; nothing is written yet.
+newOutputFiles :: [FilePath] -> IO OutputFiles
+newOutputFiles files = do
+    now <- getCurrentTime
+    OutputFiles files <$> newIORef (Report 0 now Stopped)
+
+-- | Start the next load attempt. See Note [Output file header]
+outputLoading :: OutputFiles -> IO ()
+outputLoading outputs = do
+    now <- getCurrentTime
+    update outputs $ \Report{..} -> Report (reportGeneration + 1) now $ Running $ case reportStatus of
+        Running outcome -> outcome
+        Finished outcome -> Just outcome
+        Stopped -> Nothing
+
+outputFinished :: OutputFiles -> Outcome -> IO ()
+outputFinished outputs outcome = update outputs $ \r -> r{reportStatus = Finished outcome}
+
+outputStopped :: OutputFiles -> IO ()
+outputStopped outputs = update outputs $ \r -> r{reportStatus = Stopped}
+
+update :: OutputFiles -> (Report -> Report) -> IO ()
+update (OutputFiles files ref) f = do
+    report <- atomicModifyIORef' ref $ \r -> let r' = f r in (r', r')
+    mapM_ (\file -> writeFile file $ renderReport (formatOf file) report) files
 
 
 -- | An already rendered JSON value.

@@ -11,6 +11,7 @@ import qualified Ghcid
 import Test.Util
 import Test.Parser
 import Test.Auto
+import Test.OutputFile
 import Test.API
 import Test.Ghcid
 
@@ -29,6 +30,7 @@ tests = localOption (NumThreads 1) $ testGroup "Tests"
     [utilsTests
     ,parserTests
     ,autoTests
+    ,outputFileTests
     ,apiTests
     ,ghcidTest
     ]
