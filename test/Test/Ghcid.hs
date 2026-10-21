@@ -38,7 +38,7 @@ import Prelude
 
 
 ghcidTest :: TestTree
-ghcidTest = localOption (mkTimeout 30000000) $ testGroup "Ghcid test"
+ghcidTest = testGroup "Ghcid test"
     [basicTest
     ,cdTest
     ,dotGhciTest
@@ -86,10 +86,8 @@ withGhcid args script = do
     chan <- newChan
     verbose <- isJust <$> lookupEnv "GHCID_TEST_VERBOSE"
     let require want = do
-            t <- timeout 30 $ readChan chan
-            case t of
-                Nothing -> fail $ "Require failed to produce results in time, expected: " ++ show want
-                Just got -> assertApproxInfix want got
+            got <- awaiting ("output containing " ++ show want) $ readChan chan
+            assertApproxInfix want got
             -- Ensure the next write gets a distinguishable modification time. Sleeping
             -- for exactly the measured resolution can still leave both writes in the
             -- same timestamp bucket when the sleep straddles its boundary imprecisely.
@@ -107,7 +105,7 @@ withGhcid args script = do
             withArgs (["--quiet","--no-title","--no-status"]++args) $
                 mainWithTerminal (pure $ TermSize 100 (Just 50) WrapHard) output)
         killThread $ \_ -> script require
-    waitBarrier done
+    awaiting "ghcid to stop" $ waitBarrier done
     pure res
 
 
@@ -231,7 +229,7 @@ inCabalSandbox act = copyDir "test/bar" $ whenExecutable "cabal" $ do
     let db = ["--package-db=" ++ x | x <- maybe [] splitSearchPath $ lookup "GHC_PACKAGE_PATH" env]
     (_, _, _, pid) <- createProcess $
          (proc "cabal" $ "configure":db){env = Just $ filter ((/=) "GHC_PACKAGE_PATH" . fst) env}
-    ExitSuccess <- waitForProcess pid
+    ExitSuccess <- awaiting "cabal configure" $ waitForProcess pid
     void act
 
 cabalTest :: TestTree
@@ -264,9 +262,9 @@ missingWatchPathTest :: TestTree
 missingWatchPathTest = testCase "Ghcid refuses a --restart or --reload path that does not exist" $ freshDir $ do
     write "Main.hs" "main = print 1"
     forM_ ["--restart=typo.cabal", "--reload=typo.txt"] $ \flag -> do
-        res <- timeout 20 $ try $ withArgs ["--quiet", "--no-title", "-cghci Main.hs", flag] $
+        res <- awaiting ("ghcid to refuse " ++ flag) $ try $ withArgs ["--quiet", "--no-title", "-cghci Main.hs", flag] $
             mainWithTerminal (pure $ TermSize 100 (Just 50) WrapHard) (const $ pure ())
-        res @?= Just (Left $ ExitFailure 1)
+        res @?= Left (ExitFailure 1)
 
 #if !defined(mingw32_HOST_OS)
 sigtermTest :: TestTree
@@ -285,12 +283,10 @@ sigtermTest = testCase "Ghcid SIGTERM takes a busy GHCi down with it" $ freshDir
             (proc exe ["--command=ghci Main.hs", "--test=main", "--no-title", "--no-status"])
                 {env = Just $ ("GHCID_TEST_CHILD","1") : env
                 ,std_out = UseHandle h, std_err = UseHandle h}
-        let pollUntil secs msg cond = do
-                res <- timeout secs $ whileM $ do
-                    b <- cond
-                    unless b $ sleep 0.1
-                    pure $ not b
-                when (isNothing res) $ assertFailure msg
+        let pollUntil what cond = awaiting what $ whileM $ do
+                b <- cond
+                unless b $ sleep 0.1
+                pure $ not b
         let ghciPid :: IO (Maybe ProcessID)
             ghciPid = do
                 b <- doesFileExist "ghci.pid"
@@ -300,20 +296,20 @@ sigtermTest = testCase "Ghcid SIGTERM takes a busy GHCi down with it" $ freshDir
             pid <- getPid ghcid
             whenJust pid $ signalProcess sigKILL
             void $ waitForProcess ghcid) $ do
-            pollUntil 20 "GHCi never reported its pid" $ isJust <$> ghciPid
+            pollUntil "GHCi to report its pid" $ isJust <$> ghciPid
             Just pid <- ghciPid
             let ghciAlive = (signalProcess nullSignal pid >> pure True)
                     `catchIOError` const (pure False)
             flip finally (ignored $ signalProcess sigKILL pid) $ do
                 terminateProcess ghcid
-                void $ waitForProcess ghcid
-                pollUntil 10 "ghcid leaked its GHCi child" $ not <$> ghciAlive
+                void $ awaiting "ghcid to exit" $ waitForProcess ghcid
+                pollUntil "ghcid to take its GHCi child down" $ not <$> ghciAlive
 #endif
 
--- | Wait for a file to satisfy a predicate, failing after a deadline.
+-- | Wait for a file to satisfy a predicate.
 awaitFile :: FilePath -> (String -> Bool) -> IO String
 awaitFile file ok = do
-    res <- timeout 20 $ flip loopM () $ \() -> do
+    res <- timeout hangGuard $ flip loopM () $ \() -> do
         src <- ifM (doesFileExist file) (readFile' file) (pure "")
         if ok src then pure $ Right src else do
             sleep 0.05
