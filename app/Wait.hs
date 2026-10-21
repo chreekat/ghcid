@@ -8,6 +8,7 @@
 module Wait(Waiter, Detection(..), withWaiterPoll, withWaiterNotify, waitFiles) where
 
 import Control.Concurrent.Extra
+import Control.Concurrent.Async
 import qualified Data.Map as Map
 import Control.Monad.Extra
 import Data.List.Extra
@@ -32,7 +33,7 @@ data Waiter
 
 -- | File-system notifications, audited for changes they fail to report.
 data Notifier = Notifier
-    {auditEvery :: Seconds -- ^ How long to wait for a notification before checking the files anyway
+    {audit :: IO () -- ^ Blocks until the files are due to be checked even without a notification
     ,kick :: MVar () -- ^ Filled by an event on any watch
     ,watcher :: Var Watcher
     }
@@ -76,9 +77,9 @@ withWaiterPoll :: Seconds -> (Waiter -> IO a) -> IO a
 withWaiterPoll x f = f $ WaiterPoll x
 
 -- | A waiter driven by file-system notifications, which also checks the files
---   after the given number of seconds without one.
-withWaiterNotify :: Seconds -> (Waiter -> IO a) -> IO a
-withWaiterNotify auditEvery f = do
+--   whenever the given action returns before one arrives.
+withWaiterNotify :: IO () -> (Waiter -> IO a) -> IO a
+withWaiterNotify audit f = do
     kick <- newEmptyMVar
     bracket (newVar . (`Watcher` Map.empty) =<< startManager) (stopManager . manager <=< readVar) $ \watcher ->
         f $ WaiterNotify Notifier{..}
@@ -122,8 +123,9 @@ waitFiles waiter = do
         case waiter of
             WaiterPoll t -> pure ()
             WaiterNotify n -> do
-                syncWatches n $ map fst files
+                -- See Note [Kick before sync]
                 void $ tryTakeMVar $ kick n
+                syncWatches n $ map fst files
         new <- mapM (getModTime . fst) files
         case [x | (x,Just t) <- zip files new, t > base] of
             [] -> Right <$> recheck files new
@@ -138,12 +140,14 @@ waitFiles waiter = do
                     sleep $ max 0 $ t - 0.1 -- subtract the initial 0.1 sleep from above
                     pure $ pure Reported
                 WaiterNotify n@Notifier{..} -> do
-                    woke <- timeout auditEvery $ takeMVar kick
-                    logDebug $ "WAITING: " ++ if isJust woke then "Notify signaled" else "Auditing"
-                    -- Any event may have reshaped the directories, e.g. created one on the way to a missing file
-                    syncWatches n $ map fst files
+                    -- read, not taken, so the kick outlives the race whichever side wins
+                    woke <- race (readMVar kick) audit
+                    logDebug $ "WAITING: " ++ either (const "Notify signaled") (const "Auditing") woke
                     since <- tryTakeMVar kick
-                    pure $ if isJust woke || isJust since then pure Reported else confirmMissed n
+                    -- Any event may have reshaped the directories, e.g. created one on the way to a missing file.
+                    -- See Note [Kick before sync]
+                    syncWatches n $ map fst files
+                    pure $ if isJust since then pure Reported else confirmMissed n
             new <- mapM (getModTime . fst) files
             case [x | (x,t1,t2) <- zip3 files old new, t1 /= t2] of
                 [] -> recheck files new
@@ -162,6 +166,13 @@ waitFiles waiter = do
                     (,xs) <$> detect
 
 
+-- Note [Kick before sync]
+-- ~~~~~~~~~~~~~~~~~~~~~~~
+-- A wait empties the kick before syncing the watches, never after: an event
+-- that arrives while the watches are synced may reshape the directories again
+-- (a new one on the way to a missing file needs a watch of its own), so it
+-- must stay in the kick and wake the next round, which syncs again.
+
 -- | Settle whether the audit found a change that no notification reported, allowing a
 --   second for one still in flight. Watches that missed a change cannot be trusted, so
 --   a confirmed miss replaces them all.
@@ -178,10 +189,11 @@ confirmMissed Notifier{..} = do
 -- | Watch exactly the directories holding the given paths, kicking on any event.
 --   A path whose directory is missing is covered by its nearest existing ancestor.
 syncWatches :: Notifier -> [FilePath] -> IO ()
-syncWatches Notifier{..} files = do
-    dirs <- fmap Map.fromList $ forM (nubOrd $ map takeDirectory files) $ \dir -> do
-        dir <- nearestDir dir
-        (dir,) <$> dirId dir
+syncWatches n@Notifier{..} files = do
+    let nearestDirs = fmap Map.fromList $ forM (nubOrd $ map takeDirectory files) $ \dir -> do
+            dir <- nearestDir dir
+            (dir,) <$> dirId dir
+    dirs <- nearestDirs
     modifyVar_ watcher $ \Watcher{..} -> do
         -- A watch follows its directory, not the path, so rewatch a path whose directory was replaced
         let (keep,del) = Map.partitionWithKey (\k v -> Map.lookup k dirs == Just (watchedId v)) watches
@@ -199,6 +211,8 @@ syncWatches Notifier{..} files = do
         let watches = keep `Map.union` Map.fromList new
         logDebug $ "WAITING: " ++ unwords (Map.keys watches)
         pure Watcher{..}
+    -- settled only once no directory changed while the watches went in, so every later change lands on one
+    whenM ((/= dirs) <$> nearestDirs) $ syncWatches n files
 
 -- | The canonical form of the closest existing directory at or above the given one.
 nearestDir :: FilePath -> IO FilePath
