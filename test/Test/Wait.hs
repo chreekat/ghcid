@@ -29,6 +29,12 @@ waitTests = localOption (mkTimeout 30000000) $ testGroup "Wait"
         write file "2"
         waitNudging waiter file (stamps file) >>= (@?= Just (Right (Reported, [(file, ())])))
 
+    ,testCase "A file renamed over a watched one is noticed" $ withTempDir $ \tmp -> withWaiterNotify 0.5 $ \waiter -> do
+        let file = tmp </> "a.txt"
+        write file "1"
+        let saveAtomically stamp = write (file <.> "new") "2" >> stamp >> renameFile (file <.> "new") file
+        waitNudging waiter file (map saveAtomically $ stamps $ file <.> "new") >>= (@?= Just (Right (Reported, [(file, ())])))
+
     ,testCase "A file is noticed as its missing directories appear" $ withTempDir $ \tmp -> withWaiterNotify 0.5 $ \waiter -> do
         let file = tmp </> "new" </> "sub" </> "a.txt"
         let nudges = [createDirectory $ tmp </> "new", createDirectory $ tmp </> "new" </> "sub", write file "1"] ++ stamps file
