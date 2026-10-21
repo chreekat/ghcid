@@ -118,11 +118,15 @@ screenEnd = "\0."
 -- | Run as the ghcid under test. See Note [Ghcid under test]
 ghcidChild :: IO ()
 ghcidChild = do
-    hSetEncoding stdout utf8
+    hSetEncoding stdout =<< anyText
     main <- myThreadId
     withAsync (BS.hGetContents stdin >> throwTo main ExitSuccess) $ \_ ->
         mainWithTerminal (pure $ TermSize 100 (Just 50) WrapHard) $ \screen ->
             outStr $ unlines $ map (screenLine ++) (concatMap lines screen) ++ [screenEnd]
+
+-- | UTF-8 that carries any bytes through, so neither end of the child's output can fail on them.
+anyText :: IO TextEncoding
+anyText = mkTextEncoding "UTF-8//ROUNDTRIP"
 
 -- | A running ghcid under test.
 data Child = Child
@@ -142,7 +146,8 @@ withChild sb args act = do
             ,env = Just $ ("GHCID_TEST_CHILD","1") : env
             ,std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe}
     withCreateProcess child $ \(Just inp) (Just out) (Just err) childProcess -> do
-        mapM_ (`hSetEncoding` utf8) [out, err]
+        enc <- anyText
+        mapM_ (`hSetEncoding` enc) [out, err]
         childScreens <- newChan
         childLog <- newIORef []
         let logged x = do
@@ -161,7 +166,8 @@ withChild sb args act = do
                             writeChan childScreens $ Just screen
                             screens []
                         | otherwise -> screens acc
-        withAsync (screens []) $ \_ -> withAsync (mapM_ logged . lines =<< hGetContents err) $ \_ -> do
+        withAsync (screens []) $ \reader -> withAsync (mapM_ logged . lines =<< hGetContents err) $ \logger -> do
+            mapM_ link [reader, logger]
             res <- act Child{..}
             hClose inp
             void $ awaiting "ghcid to stop" $ waitForProcess childProcess
