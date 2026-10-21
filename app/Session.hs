@@ -256,12 +256,14 @@ sessionReload session@Session{..} = do
 --   Argument to done is the final stderr line.
 sessionExecAsync :: Session -> String -> (String -> IO ()) -> IO ()
 sessionExecAsync Session{..} cmd done = do
-    Just ghci <- readIORef ghci
+    Just v <- readIORef ghci
     stderr <- newIORef ""
     modifyVar_ running $ const $ pure True
     caller <- myThreadId
-    void $ flip forkFinally (either (throwTo caller) (const $ pure ())) $ do
-        execStream ghci cmd $ \strm msg ->
+    -- a GHCi the session has since let go of was killed on purpose, so its failure is no news
+    let failed e = whenJustM (readIORef ghci) $ \now -> when (now == v) $ throwTo caller e
+    void $ flip forkFinally (either failed (const $ pure ())) $ do
+        execStream v cmd $ \strm msg ->
             when (msg /= "*** Exception: ExitSuccess") $ do
                 when (strm == Stderr) $ writeIORef stderr msg
                 whenNormal $ outStrLn msg

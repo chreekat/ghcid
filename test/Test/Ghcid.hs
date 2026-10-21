@@ -54,6 +54,7 @@ ghcidTest = testGroup "Ghcid test"
     ,brokenStartupOutputTest
     ,outputDirectoryTest
     ,generationTest
+    ,restartDuringTestTest
 #if !defined(mingw32_HOST_OS)
     ,sigtermTest
     ,missedChangeTest
@@ -463,3 +464,16 @@ generationTest = disable19650 $ testCase "Output files count load attempts acros
         write sb "restart.txt" "x"
         require [allGoodMessage]
         generation 3
+
+restartDuringTestTest :: TestTree
+restartDuringTestTest = disable19650 $ testCase "A restart while the test runs does not report the old GHCi's death" $ freshDir $ \sb -> do
+    write sb "Main.hs" $ unlines
+        ["import Control.Concurrent"
+        ,"main = writeFile \"running\" \"yes\" >> threadDelay 300000000"
+        ]
+    write sb "restart.txt" ""
+    withGhcid sb ["-cghci Main.hs", "--test=main", "--restart=restart.txt"] $ \require -> do
+        require [allGoodMessage]
+        void $ awaitFile (path sb "running") (== "yes")
+        write sb "restart.txt" "x"
+        require [allGoodMessage]
