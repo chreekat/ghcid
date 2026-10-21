@@ -8,6 +8,12 @@ Unreleased
         command fails at startup
     *Auto cabal repl uses --builddir=dist-newstyle/ghcid,
         --enable-multi-repl all, and faster session flags on modern GHCs
+    *Output files start with a header giving the load attempt's
+        generation, state and start time, also as JSON fields, and show
+        the previous result under a loading state during a reload
+    Output files show the command's own output when it fails at startup
+    JSON output files stay valid JSON when ghcid stops or lint fails
+    Write the stopped message to output files relative to --directory
 
 1.0.0, released 2026-08-18
     #397, #399, #400, promptly clean up entire process groups and force
