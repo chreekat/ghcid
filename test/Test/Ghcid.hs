@@ -132,6 +132,21 @@ ghcidChild = do
 anyText :: IO TextEncoding
 anyText = mkTextEncoding "UTF-8//ROUNDTRIP"
 
+-- | The environment of ghcid under test: the given empty home, so no user GHCi
+--   configuration reaches its GHCi, but the user's cabal and stack state.
+childEnv :: FilePath -> IO [(String, String)]
+childEnv home = do
+    env <- getEnvironment
+    realHome <- getHomeDirectory
+    -- where the tools find their state through HOME, unless the environment says otherwise
+    pinned <- flip filterM
+        [("CABAL_DIR", realHome </> ".cabal")
+        ,("STACK_ROOT", realHome </> ".stack")
+        ,("XDG_CACHE_HOME", realHome </> ".cache")
+        ,("XDG_STATE_HOME", realHome </> ".local" </> "state")
+        ] $ \(var, dir) -> (isNothing (lookup var env) &&) <$> doesDirectoryExist dir
+    pure $ ("HOME", home) : pinned ++ filter ((/= "HOME") . fst) env
+
 -- | A running ghcid under test.
 data Child = Child
     {childProcess :: ProcessHandle
@@ -142,9 +157,9 @@ data Child = Child
 -- | Run ghcid with the given arguments in a sandbox, stopping it at the end.
 --   See Note [Ghcid under test]
 withChild :: Sandbox -> [String] -> (Child -> IO a) -> IO a
-withChild sb args act = do
+withChild sb args act = withTempDir $ \home -> do
     exe <- getExecutablePath
-    env <- getEnvironment
+    env <- childEnv home
     let child = (proc exe args)
             {cwd = Just $ sandboxDir sb
             ,env = Just $ ("GHCID_TEST_CHILD","1") : env
