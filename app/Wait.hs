@@ -8,6 +8,7 @@
 module Wait(Waiter, Detection(..), withWaiterPoll, withWaiterNotify, waitFiles) where
 
 import Control.Concurrent.Extra
+import Control.Concurrent.Async
 import qualified Data.Map as Map
 import Control.Monad.Extra
 import Data.List.Extra
@@ -32,7 +33,7 @@ data Waiter
 
 -- | File-system notifications, audited for changes they fail to report.
 data Notifier = Notifier
-    {auditEvery :: Seconds -- ^ How long to wait for a notification before checking the files anyway
+    {audit :: IO () -- ^ Blocks until the files are due to be checked even without a notification
     ,kick :: MVar () -- ^ Filled by an event on any watch
     ,watcher :: Var Watcher
     }
@@ -76,9 +77,9 @@ withWaiterPoll :: Seconds -> (Waiter -> IO a) -> IO a
 withWaiterPoll x f = f $ WaiterPoll x
 
 -- | A waiter driven by file-system notifications, which also checks the files
---   after the given number of seconds without one.
-withWaiterNotify :: Seconds -> (Waiter -> IO a) -> IO a
-withWaiterNotify auditEvery f = do
+--   whenever the given action returns before one arrives.
+withWaiterNotify :: IO () -> (Waiter -> IO a) -> IO a
+withWaiterNotify audit f = do
     kick <- newEmptyMVar
     bracket (newVar . (`Watcher` Map.empty) =<< startManager) (stopManager . manager <=< readVar) $ \watcher ->
         f $ WaiterNotify Notifier{..}
@@ -138,12 +139,13 @@ waitFiles waiter = do
                     sleep $ max 0 $ t - 0.1 -- subtract the initial 0.1 sleep from above
                     pure $ pure Reported
                 WaiterNotify n@Notifier{..} -> do
-                    woke <- timeout auditEvery $ takeMVar kick
-                    logDebug $ "WAITING: " ++ if isJust woke then "Notify signaled" else "Auditing"
+                    -- read, not taken, so the kick outlives the race whichever side wins
+                    woke <- race (readMVar kick) audit
+                    logDebug $ "WAITING: " ++ either (const "Notify signaled") (const "Auditing") woke
                     -- Any event may have reshaped the directories, e.g. created one on the way to a missing file
                     syncWatches n $ map fst files
                     since <- tryTakeMVar kick
-                    pure $ if isJust woke || isJust since then pure Reported else confirmMissed n
+                    pure $ if isJust since then pure Reported else confirmMissed n
             new <- mapM (getModTime . fst) files
             case [x | (x,t1,t2) <- zip3 files old new, t1 /= t2] of
                 [] -> recheck files new

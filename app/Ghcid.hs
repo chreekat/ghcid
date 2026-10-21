@@ -359,7 +359,7 @@ mainWithTerminal termSize termOutput = do
                     else id
 
                 let output = clear . termOutput . restyle
-                maybe (withWaiterNotify auditPeriod) withWaiterPoll (poll opts) $ \waiter -> do
+                maybe (withWaiterNotify $ sleep auditPeriod) withWaiterPoll (poll opts) $ \waiter -> do
                     let exited (UnexpectedExit cmd _ mmsg) transcript = do
                             -- A dead session (e.g. a broken .cabal file) can only be
                             -- restarted, so sit out the broken state until a change.

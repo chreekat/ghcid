@@ -4,6 +4,8 @@
 module Test.Wait(waitTests) where
 
 import Control.Concurrent.Async
+import Control.Monad.Extra
+import Data.IORef
 import Data.Time.Clock.POSIX
 import System.Directory
 import System.FilePath
@@ -22,7 +24,7 @@ import Test.Common
 
 waitTests :: TestTree
 waitTests = testGroup "Wait"
-    [testCase "A replaced directory is watched again" $ withTempDir $ \tmp -> withWaiterNotify 0.5 $ \waiter -> do
+    [testCase "A replaced directory is watched again" $ withTempDir $ \tmp -> withWaiterNotify never $ \waiter -> do
         let file = tmp </> "sub" </> "a.txt"
         write file "1"
         waitNudging waiter file (stamps file) >>= (@?= Right (Reported, [(file, ())]))
@@ -30,29 +32,42 @@ waitTests = testGroup "Wait"
         write file "2"
         waitNudging waiter file (stamps file) >>= (@?= Right (Reported, [(file, ())]))
 
-    ,testCase "A file renamed over a watched one is noticed" $ withTempDir $ \tmp -> withWaiterNotify 0.5 $ \waiter -> do
+    ,testCase "A file renamed over a watched one is noticed" $ withTempDir $ \tmp -> withWaiterNotify never $ \waiter -> do
         let file = tmp </> "a.txt"
         write file "1"
         let saveAtomically stamp = write (file <.> "new") "2" >> stamp >> renameFile (file <.> "new") file
         waitNudging waiter file (map saveAtomically $ stamps $ file <.> "new") >>= (@?= Right (Reported, [(file, ())]))
 
-    ,testCase "A file is noticed as its missing directories appear" $ withTempDir $ \tmp -> withWaiterNotify 0.5 $ \waiter -> do
+    ,testCase "A file is noticed as its missing directories appear" $ withTempDir $ \tmp -> withWaiterNotify never $ \waiter -> do
         let file = tmp </> "new" </> "sub" </> "a.txt"
         let nudges = [createDirectory $ tmp </> "new", createDirectory $ tmp </> "new" </> "sub", write file "1"] ++ stamps file
         waitNudging waiter file nudges >>= (@?= Right (Reported, [(file, ())]))
 
 #if !defined(mingw32_HOST_OS)
-    ,testCase "A change the watcher misses is found by the audit, and watching resumes" $ withTempDir $ \tmp -> withWaiterNotify 0.5 $ \waiter -> do
-        let file = tmp </> "watched" </> "a.txt"
-        let link = tmp </> "unwatched" </> "a.txt"
-        write file "1"
-        createDirectory $ takeDirectory link
-        createLink file link
-        -- changes through an unwatched hard link raise no notification for the watched name
-        waitNudging waiter file (stamps link) >>= (@?= Right (Missed, [(file, ())]))
-        waitNudging waiter file (stamps file) >>= (@?= Right (Reported, [(file, ())]))
+    ,testCase "A change the watcher misses is found by the audit, and watching resumes" $ withTempDir $ \tmp -> do
+        auditing <- newIORef True
+        withWaiterNotify (auditWhile auditing) $ \waiter -> do
+            let file = tmp </> "watched" </> "a.txt"
+            let link = tmp </> "unwatched" </> "a.txt"
+            write file "1"
+            createDirectory $ takeDirectory link
+            createLink file link
+            -- changes through an unwatched hard link raise no notification for the watched name
+            waitNudging waiter file (stamps link) >>= (@?= Right (Missed, [(file, ())]))
+            writeIORef auditing False
+            waitNudging waiter file (stamps file) >>= (@?= Right (Reported, [(file, ())]))
 #endif
     ]
+
+-- | An audit that never comes, so only a notification can end a wait.
+never :: IO ()
+never = forever $ sleep 3600
+
+-- | An audit that comes soon whenever the switch is on.
+auditWhile :: IORef Bool -> IO ()
+auditWhile on = do
+    sleep 0.05
+    unlessM (readIORef on) $ auditWhile on
 
 write :: FilePath -> String -> IO ()
 write file x = do
