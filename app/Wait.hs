@@ -180,10 +180,11 @@ confirmMissed Notifier{..} = do
 -- | Watch exactly the directories holding the given paths, kicking on any event.
 --   A path whose directory is missing is covered by its nearest existing ancestor.
 syncWatches :: Notifier -> [FilePath] -> IO ()
-syncWatches Notifier{..} files = do
-    dirs <- fmap Map.fromList $ forM (nubOrd $ map takeDirectory files) $ \dir -> do
-        dir <- nearestDir dir
-        (dir,) <$> dirId dir
+syncWatches n@Notifier{..} files = do
+    let nearestDirs = fmap Map.fromList $ forM (nubOrd $ map takeDirectory files) $ \dir -> do
+            dir <- nearestDir dir
+            (dir,) <$> dirId dir
+    dirs <- nearestDirs
     modifyVar_ watcher $ \Watcher{..} -> do
         -- A watch follows its directory, not the path, so rewatch a path whose directory was replaced
         let (keep,del) = Map.partitionWithKey (\k v -> Map.lookup k dirs == Just (watchedId v)) watches
@@ -201,6 +202,8 @@ syncWatches Notifier{..} files = do
         let watches = keep `Map.union` Map.fromList new
         logDebug $ "WAITING: " ++ unwords (Map.keys watches)
         pure Watcher{..}
+    -- settled only once no directory changed while the watches went in, so every later change lands on one
+    whenM ((/= dirs) <$> nearestDirs) $ syncWatches n files
 
 -- | The canonical form of the closest existing directory at or above the given one.
 nearestDir :: FilePath -> IO FilePath
