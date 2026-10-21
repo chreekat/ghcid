@@ -62,14 +62,20 @@ ghcidTest = testGroup "Ghcid test"
 
 
 -- | A test's private directory, where its ghcid runs.
-newtype Sandbox = Sandbox FilePath
+data Sandbox = Sandbox
+    {sandboxDir :: FilePath
+    ,stagingDir :: FilePath -- ^ Outside the sandbox on the same file system, where 'write' prepares files
+    }
 
 -- | A path inside the sandbox.
 path :: Sandbox -> FilePath -> FilePath
-path (Sandbox dir) x = dir </> x
+path sb x = sandboxDir sb </> x
 
 freshDir :: (Sandbox -> IO a) -> IO a
-freshDir act = withTempDir $ act . Sandbox
+freshDir act = withTempDir $ \tmp -> do
+    let sb = Sandbox (tmp </> "sandbox") (tmp </> "staging")
+    mapM_ createDirectory [sandboxDir sb, stagingDir sb]
+    act sb
 
 copyDir :: FilePath -> (Sandbox -> IO a) -> IO ()
 copyDir dir act = do
@@ -128,11 +134,11 @@ data Child = Child
 -- | Run ghcid with the given arguments in a sandbox, stopping it at the end.
 --   See Note [Ghcid under test]
 withChild :: Sandbox -> [String] -> (Child -> IO a) -> IO a
-withChild (Sandbox dir) args act = do
+withChild sb args act = do
     exe <- getExecutablePath
     env <- getEnvironment
     let child = (proc exe args)
-            {cwd = Just dir
+            {cwd = Just $ sandboxDir sb
             ,env = Just $ ("GHCID_TEST_CHILD","1") : env
             ,std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe}
     withCreateProcess child $ \(Just inp) (Just out) (Just err) childProcess -> do
@@ -189,16 +195,21 @@ assertApproxInfix want got context = do
     all ((`isInfixOf` got2) . simple) want @?
         "Expected " ++ show want ++ ", got " ++ show got ++ context
 
+-- | Replace a file's contents in one step, as a careful editor saves.
 write :: Sandbox -> FilePath -> String -> IO ()
 write sb file x = do
     whenVerbose $ print ("writeFile",file,x)
-    createDirectoryIfMissing True $ takeDirectory $ path sb file
-    writeFile (path sb file) x
+    let dest = path sb file
+        new = stagingDir sb </> "new"
+    createDirectoryIfMissing True $ takeDirectory dest
+    writeFile new x
+    whenM (doesFileExist dest) $ copyPermissions dest new
+    renameFile new dest
 
 append :: Sandbox -> FilePath -> String -> IO ()
 append sb file x = do
     whenVerbose $ print ("appendFile",file,x)
-    appendFile (path sb file) x
+    write sb file . (++ x) =<< readFile' (path sb file)
 
 rename :: Sandbox -> FilePath -> FilePath -> IO ()
 rename sb from to = do
@@ -298,11 +309,11 @@ loadConfigRestartFilterTest = testCase "Ignore generated cabal script setcwd.ghc
 
 -- | Run in a copy of test/bar with cabal configured for the ambient package-db.
 inCabalSandbox :: (Sandbox -> IO a) -> IO ()
-inCabalSandbox act = copyDir "test/bar" $ \sb@(Sandbox dir) -> whenExecutable "cabal" $ do
+inCabalSandbox act = copyDir "test/bar" $ \sb -> whenExecutable "cabal" $ do
     env <- getEnvironment
     let db = ["--package-db=" ++ x | x <- maybe [] splitSearchPath $ lookup "GHC_PACKAGE_PATH" env]
     (_, _, _, pid) <- createProcess $
-         (proc "cabal" $ "configure":db){cwd = Just dir, env = Just $ filter ((/=) "GHC_PACKAGE_PATH" . fst) env}
+         (proc "cabal" $ "configure":db){cwd = Just $ sandboxDir sb, env = Just $ filter ((/=) "GHC_PACKAGE_PATH" . fst) env}
     ExitSuccess <- awaiting "cabal configure" $ waitForProcess pid
     void $ act sb
 
@@ -392,8 +403,17 @@ missedChangeTest = disable19650 $ testCase "Ghcid reloads on a change its file w
     createLink (path sb "Main.hs") (path sb "elsewhere/Main.hs")
     withGhcid sb ["-cghci Main.hs"] $ \require -> do
         require [allGoodMessage]
-        writeFile (path sb "elsewhere/Main.hs") "x"
+        overwrite (path sb "elsewhere/Main.hs") "x"
         require ["Main.hs:1:1"," Parse error:"]
+#endif
+
+#if !defined(mingw32_HOST_OS)
+-- | Change a file's contents in a single write, keeping the file (and so its other
+--   links), padding with spaces to cover the old contents without truncating them.
+overwrite :: FilePath -> String -> IO ()
+overwrite file x = do
+    old <- length <$> readFile' file
+    withFile file ReadWriteMode $ \h -> hPutStr h $ x ++ replicate (old - length x) ' '
 #endif
 
 -- | A command that dies at startup must wait for a change, not exit.
