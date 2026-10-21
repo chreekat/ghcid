@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 
 -- | Test behavior of the executable, polling files for changes
 module Test.Ghcid(ghcidTest) where
@@ -16,6 +17,12 @@ import System.Environment
 import System.Process.Extra
 import System.FilePath
 import System.Exit
+#if !defined(mingw32_HOST_OS)
+import Text.Read
+import System.IO.Error
+import System.Posix.Signals
+import System.Posix.Types
+#endif
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -39,6 +46,9 @@ ghcidTest = localOption (mkTimeout 30000000) $ testGroup "Ghcid test"
     ,cabalRestartTest
     ,noModulesTest
     ,brokenStartupTest
+#if !defined(mingw32_HOST_OS)
+    ,sigtermTest
+#endif
     ]
 
 
@@ -243,6 +253,48 @@ noModulesTest = disable19650 $ testCase "Ghcid waits when nothing is loaded" $ f
         require ["can't find"]
         write "Main.hs" "main = print 1"
         require [allGoodMessage]
+
+#if !defined(mingw32_HOST_OS)
+sigtermTest :: TestTree
+sigtermTest = testCase "Ghcid SIGTERM takes a busy GHCi down with it" $ freshDir $ do
+    write "Main.hs" $ unlines
+        ["import Control.Concurrent"
+        ,"import System.Posix.Process"
+        ,"main = do"
+        ,"    writeFile \"ghci.pid\" . show =<< getProcessID"
+        ,"    threadDelay 300000000"
+        ]
+    exe <- getExecutablePath
+    env <- getEnvironment
+    withFile "ghcid.out" WriteMode $ \h -> do
+        (_, _, _, ghcid) <- createProcess
+            (proc exe ["--command=ghci Main.hs", "--test=main", "--no-title", "--no-status"])
+                {env = Just $ ("GHCID_TEST_CHILD","1") : env
+                ,std_out = UseHandle h, std_err = UseHandle h}
+        let pollUntil secs msg cond = do
+                res <- timeout secs $ whileM $ do
+                    b <- cond
+                    unless b $ sleep 0.1
+                    pure $ not b
+                when (isNothing res) $ assertFailure msg
+        let ghciPid :: IO (Maybe ProcessID)
+            ghciPid = do
+                b <- doesFileExist "ghci.pid"
+                if not b then pure Nothing else
+                    fmap fromInteger . readMaybe <$> readFile' "ghci.pid"
+        flip finally (ignored $ do
+            pid <- getPid ghcid
+            whenJust pid $ signalProcess sigKILL
+            void $ waitForProcess ghcid) $ do
+            pollUntil 20 "GHCi never reported its pid" $ isJust <$> ghciPid
+            Just pid <- ghciPid
+            let ghciAlive = (signalProcess nullSignal pid >> pure True)
+                    `catchIOError` const (pure False)
+            flip finally (ignored $ signalProcess sigKILL pid) $ do
+                terminateProcess ghcid
+                void $ waitForProcess ghcid
+                pollUntil 10 "ghcid leaked its GHCi child" $ not <$> ghciAlive
+#endif
 
 -- | A command that dies at startup must wait for a change, not exit.
 brokenStartupTest :: TestTree

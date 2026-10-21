@@ -7,6 +7,7 @@ module Ghcid(
     Options(..), ColorMode(..), ProjectProbe(..), autoCommand
     ) where
 
+import Control.Concurrent
 import Control.Exception
 import System.IO.Error
 import Control.Applicative
@@ -287,6 +288,7 @@ printStopped opts =
 -- | Like 'main', but run with a fake terminal for testing
 mainWithTerminal :: IO TermSize -> ([String] -> IO ()) -> IO ()
 mainWithTerminal termSize termOutput = do
+    installFatalSignalHandlers =<< myThreadId
     opts <- withGhcidArgs $ cmdArgsRun options
     logDebug $ "OS: " ++ os
     logDebug $ "ARCH: " ++ arch

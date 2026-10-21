@@ -14,7 +14,8 @@ module Language.Haskell.Ghcid.Util(
     allGoodMessage,
     getModTime, getModTimeResolution, getShortTime,
     withCreateProcessGroup,
-    killProcessGroup
+    killProcessGroup,
+    installFatalSignalHandlers
     ) where
 
 import System.Console.CmdArgs.Verbosity
@@ -38,6 +39,7 @@ import Control.Applicative
 import Prelude
 import System.Process
 #if !defined(mingw32_HOST_OS)
+import System.Exit
 import System.Posix.Process
 import System.Posix.Signals
 #endif
@@ -157,6 +159,18 @@ getModTimeResolutionCache = unsafePerformIO $ withTempDir $ \dir -> do
     putStrLn $ "Longest file modification time lag was " ++ show (ceiling (mtime * 1000)) ++ "ms"
     -- add a little bit of safety, but if it's really quick, don't make it that much slower
     pure $ mtime + min 0.1 mtime
+
+-- | Deliver fatal termination signals (SIGTERM, SIGHUP) to the given thread as
+--   the conventional 128+signal 'ExitFailure', so cleanup handlers run before
+--   the process exits. A no-op on Windows.
+installFatalSignalHandlers :: ThreadId -> IO ()
+#if defined(mingw32_HOST_OS)
+installFatalSignalHandlers _ = pure ()
+#else
+installFatalSignalHandlers thread =
+    forM_ [sigTERM, sigHUP] $ \sig ->
+        installHandler sig (Catch $ throwTo thread $ ExitFailure $ 128 + fromIntegral sig) Nothing
+#endif
 
 withCreateProcessGroup proc f = do
     let undo (_, _, _, proc) = ignored $ killProcessGroup proc

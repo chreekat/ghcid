@@ -1,6 +1,7 @@
 Changelog for ghcid (* = breaking change)
 
 Unreleased
+    Kill the GHCi process group when terminated by SIGTERM or SIGHUP
     Restart on .cabal, cabal.project and stack.yaml changes even with
         a custom --command
     Wait for a change instead of exiting when nothing is loaded or the
