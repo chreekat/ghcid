@@ -49,9 +49,11 @@ waitTests = testGroup "Wait"
         withWaiterNotify (auditWhile auditing) $ \waiter -> do
             let file = tmp </> "watched" </> "a.txt"
             let link = tmp </> "unwatched" </> "a.txt"
-            write file "1"
-            createDirectory $ takeDirectory link
-            createLink file link
+            -- written only through the unwatched name, so closing a copy of the write handle,
+            -- however late (say, inherited by a process another test spawns), is reported there
+            write link "1"
+            createDirectory $ takeDirectory file
+            createLink link file
             -- changes through an unwatched hard link raise no notification for the watched name
             waitNudging waiter file (stamps link) >>= (@?= Right (Missed, [(file, ())]))
             writeIORef auditing False
