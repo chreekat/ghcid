@@ -140,4 +140,5 @@ test-suite ghcid_test
         Test.OutputFile
         Test.Parser
         Test.Util
+        Test.Wait
         Wait

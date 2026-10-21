@@ -14,6 +14,7 @@ import Test.Auto
 import Test.OutputFile
 import Test.API
 import Test.Ghcid
+import Test.Wait
 
 main :: IO ()
 main = do
@@ -32,5 +33,6 @@ tests = localOption (NumThreads 1) $ testGroup "Tests"
     ,autoTests
     ,outputFileTests
     ,apiTests
+    ,waitTests
     ,ghcidTest
     ]
