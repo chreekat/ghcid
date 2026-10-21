@@ -47,6 +47,7 @@ ghcidTest = localOption (mkTimeout 30000000) $ testGroup "Ghcid test"
     ,cabalRestartTest
     ,noModulesTest
     ,missingWatchPathTest
+    ,stoppedReasonTest
     ,brokenStartupTest
     ,brokenStartupOutputTest
     ,outputDirectoryTest
@@ -267,6 +268,16 @@ missingWatchPathTest = testCase "Ghcid refuses a --restart or --reload path that
         res <- timeout 20 $ try $ withArgs ["--quiet", "--no-title", "-cghci Main.hs", flag] $
             mainWithTerminal (pure $ TermSize 100 (Just 50) WrapHard) (const $ pure ())
         res @?= Just (Left $ ExitFailure 1)
+
+stoppedReasonTest :: TestTree
+stoppedReasonTest = testCase "Output files say why ghcid stopped" $ freshDir $ do
+    write "Main.hs" "main = print 1"
+    res <- timeout 20 $ try $ withArgs ["--quiet", "--no-title", "-cghci Main.hs", "--restart=typo.cabal", "-oerrors.err", "-oerrors.json"] $
+        mainWithTerminal (pure $ TermSize 100 (Just 50) WrapHard) (const $ pure ())
+    res @?= Just (Left $ ExitFailure 1)
+    forM_ ["errors.err", "errors.json"] $ \file -> do
+        src <- readFile' file
+        assertBool (file ++ " lacks the reason:\n" ++ src) $ "--restart path does not exist: typo.cabal" `isInfixOf` src
 
 #if !defined(mingw32_HOST_OS)
 sigtermTest :: TestTree

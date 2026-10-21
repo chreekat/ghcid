@@ -57,7 +57,7 @@ formatOf file
 data Status
     = Running (Maybe Outcome) -- ^ Underway, holding the previous outcome, if any
     | Finished Outcome
-    | Stopped -- ^ ghcid has exited
+    | Stopped [String] -- ^ ghcid has exited, for the reason given in these lines, if known
 
 -- | Everything one rewrite of the output files shows.
 data Report = Report
@@ -70,7 +70,7 @@ stateName :: Status -> String
 stateName Running{} = "loading"
 stateName (Finished Loaded{}) = "done"
 stateName (Finished CommandFailed{}) = "failed"
-stateName Stopped = "stopped"
+stateName Stopped{} = "stopped"
 
 -- | The contents of an output file. See Note [Output file header]
 renderReport :: Format -> Report -> String
@@ -85,7 +85,7 @@ renderReport TextFormat Report{..} = unlines $
     case reportStatus of
         Running outcome -> maybe [] textBody outcome
         Finished outcome -> textBody outcome
-        Stopped -> ["Ghcid has stopped."]
+        Stopped why -> "Ghcid has stopped." : why
 renderReport JsonFormat Report{..} = showJSON $
     [("generation", JScalar $ show reportGeneration)
     ,("state", JScalar $ jString $ stateName reportStatus)
@@ -94,7 +94,7 @@ renderReport JsonFormat Report{..} = showJSON $
     case reportStatus of
         Running outcome -> maybe nothingLoaded jsonFields outcome
         Finished outcome -> jsonFields outcome
-        Stopped -> nothingLoaded
+        Stopped why -> [("reason", JArray $ map jString why) | not $ null why] ++ nothingLoaded
     where nothingLoaded = [("loaded", JArray []), ("messages", JArray [])]
 
 textBody :: Outcome -> [String]
@@ -125,7 +125,7 @@ data OutputFiles = OutputFiles [FilePath] (IORef Report)
 newOutputFiles :: [FilePath] -> IO OutputFiles
 newOutputFiles files = do
     now <- getCurrentTime
-    OutputFiles files <$> newIORef (Report 0 now Stopped)
+    OutputFiles files <$> newIORef (Report 0 now $ Stopped [])
 
 -- | Start the next load attempt. See Note [Output file header]
 outputLoading :: OutputFiles -> IO ()
@@ -134,13 +134,16 @@ outputLoading outputs = do
     update outputs $ \Report{..} -> Report (reportGeneration + 1) now $ Running $ case reportStatus of
         Running outcome -> outcome
         Finished outcome -> Just outcome
-        Stopped -> Nothing
+        Stopped _ -> Nothing
 
 outputFinished :: OutputFiles -> Outcome -> IO ()
 outputFinished outputs outcome = update outputs $ \r -> r{reportStatus = Finished outcome}
 
-outputStopped :: OutputFiles -> IO ()
-outputStopped outputs = update outputs $ \r -> r{reportStatus = Stopped}
+-- | ghcid is exiting; stopping again keeps the reason already given.
+outputStopped :: OutputFiles -> [String] -> IO ()
+outputStopped outputs why = update outputs $ \r -> r{reportStatus = Stopped $ case reportStatus r of
+    Stopped earlier -> earlier ++ why
+    _ -> why}
 
 update :: OutputFiles -> (Report -> Report) -> IO ()
 update (OutputFiles files ref) f = do

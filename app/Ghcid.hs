@@ -272,13 +272,27 @@ data TermSize = TermSize
     ,termWrap :: WordWrap
     }
 
+-- | ghcid cannot carry on, for the reason given in these lines.
+newtype Fatal = Fatal [String] deriving Show
+instance Exception Fatal
+
+fatal :: [String] -> IO a
+fatal = throwIO . Fatal
+
+-- | Run ghcid, logging a 'Fatal' reason and leaving it in the output files on the way out.
+withStopReport :: OutputFiles -> IO () -> IO ()
+withStopReport outputs act = do
+    why <- ((act >> pure []) `catch` \(Fatal why) -> mapM_ logErr why >> pure why)
+        `onException` outputStopped outputs []
+    outputStopped outputs why
+    unless (null why) exitFailure
+
 -- | On the 'UnexpectedExit' exception exit with a nice error message.
 handleErrors :: IO () -> IO ()
-handleErrors = handle $ \(UnexpectedExit cmd _ mmsg) -> do
-    logErr $ "Command \"" ++ cmd ++ "\" exited unexpectedly" ++ case mmsg of
+handleErrors = handle $ \(UnexpectedExit cmd _ mmsg) ->
+    fatal $ pure $ "Command \"" ++ cmd ++ "\" exited unexpectedly" ++ case mmsg of
         Just msg -> " with error message: " ++ msg
         Nothing -> ""
-    exitFailure
 
 -- | A complaint naming each user-given @--restart@ and @--reload@ path that does not exist.
 missingWatchPaths :: Options -> IO [String]
@@ -307,11 +321,9 @@ mainWithTerminal termSize termOutput = do
           | otherwise = act Nothing
 
     outputs <- newOutputFiles $ outputfile opts
-    flip finally (outputStopped outputs) $ withServerMaybe (\serverEnv -> handleErrors $ do
+    withStopReport outputs $ withServerMaybe (\serverEnv -> handleErrors $ do
         missing <- missingWatchPaths opts
-        unless (null missing) $ do
-            logErr $ unlines missing
-            exitFailure
+        unless (null missing) $ fatal missing
         forever $ withWindowIcon $ withSession $ \session -> do
             -- Update the server's session reference on each (re)start
             mapM_ (`updateSession` session) serverEnv
@@ -450,9 +462,8 @@ runGhcid session waiter termSize termOutput outputs opts@Options{..} serverEnv =
                     else x ++ pad
             termOutput $ applyPadding $ map fromEsc ((if termWrap == WrapSoft then mergeSoft else map fst) $ load ++ msg)
 
-    when (ignoreLoaded && null reload) $ do
-        logErr "--reload must be set when using --ignore-loaded"
-        exitFailure
+    when (ignoreLoaded && null reload) $
+        fatal ["--reload must be set when using --ignore-loaded"]
 
     nextWait <- waitFilesReporting waiter
     outputLoading outputs -- See Note [Output file header]
@@ -514,9 +525,8 @@ runGhcid session waiter termSize termOutput outputs opts@Options{..} serverEnv =
             outputFinished outputs $ Loaded loaded messages $
                 map unescape $ prettyOutput currTime loadedCount (limitMessages ordMessages) evals
             if null loaded && not ignoreLoaded then
-              if null $ restart ++ reload then do
-                logErr "No files loaded, nothing to wait for. Fix the last error and restart."
-                exitFailure
+              if null $ restart ++ reload then
+                fatal ["No files loaded, nothing to wait for. Fix the last error and restart."]
               else do
                 -- Nothing to reload, so any change gets a fresh start.
                 logErr "No files loaded, waiting for changes that will restart ghcid."

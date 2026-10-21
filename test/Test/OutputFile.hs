@@ -53,8 +53,9 @@ outputFileTests = testGroup "Output file"
             shown >>= (@?= (["generation=1", "state=done"], outcomeText allGood))
             outputLoading outputs
             shown >>= (@?= (["generation=2", "state=loading"], outcomeText allGood))
-            outputStopped outputs
-            shown >>= (@?= (["generation=2", "state=stopped"], ["Ghcid has stopped."]))
+            outputStopped outputs ["--restart path does not exist: x"]
+            outputStopped outputs []
+            shown >>= (@?= (["generation=2", "state=stopped"], ["Ghcid has stopped.", "--restart path does not exist: x"]))
     ]
     where
         started = UTCTime (fromGregorian 2026 10 21) (picosecondsToDiffTime 34992345000000000)

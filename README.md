@@ -107,10 +107,10 @@ You will variously see `file:line:col:message`, `file:line:col1-col2:msg` and `f
     All good (12 modules, at 09:43:13)
 
 * `generation` counts load attempts (the first load, each reload and each restart) since `ghcid` started.
-* `state` is `loading` while an attempt runs, and the rest of the file still shows the previous attempt. It is `done` once the attempt loads, `failed` if the command exits (the rest of the file is the command's output, and `ghcid` waits for a change before restarting it), and `stopped` once `ghcid` exits.
+* `state` is `loading` while an attempt runs, and the rest of the file still shows the previous attempt. It is `done` once the attempt loads, `failed` if the command exits (the rest of the file is the command's output, and `ghcid` waits for a change before restarting it), and `stopped` once `ghcid` exits (followed by why, when `ghcid` stopped itself).
 * `started` is when the attempt began, in UTC. Once `state` is not `loading`, the file reflects every source edit made before that time.
 
-So to see the result of an edit, wait until `state` is not `loading` and `started` is later than the edit. The JSON form has `generation`, `state` and `started` (as `2026-10-21T09:43:12.345678901Z`) fields, alongside `loaded` and `messages`, and `command` and `output` when `state` is `failed`.
+So to see the result of an edit, wait until `state` is not `loading` and `started` is later than the edit. The JSON form has `generation`, `state` and `started` (as `2026-10-21T09:43:12.345678901Z`) fields, alongside `loaded` and `messages`, `command` and `output` when `state` is `failed`, and `reason` when `ghcid` stopped itself.
 
 #### What if the error message is too big for my console?
 You can let `ghcid` print more with `--no-height-limit`. The first error message might end up outside of the console view, so you can use `--reverse-errors` to flip the order of the errors and warnings. Further error messages are just a scroll away. Finally if you're going to be scrolling, you can achieve a cleaner experience with the `--clear` flag, which clears the console on reload.
