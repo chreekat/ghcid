@@ -388,6 +388,7 @@ mainWithTerminal termSize termOutput = do
                         `catches`
                             [Handler $ \(StartupFailed e transcript) -> exited e transcript
                             ,Handler $ \e -> exited e $ maybeToList $ ghciErrorLastStdErr e
+                            ,Handler $ \(GhciDied e) -> exited e $ maybeToList $ ghciErrorLastStdErr e
                             ]
         )
 

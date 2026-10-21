@@ -3,7 +3,7 @@
 -- | A persistent version of the Ghci session, encoding lots of semantics on top.
 --   Not suitable for calling multithreaded.
 module Session(
-    Session, PathMode(..), StartupFailed(..), enableEval, withSession,
+    Session, PathMode(..), StartupFailed(..), GhciDied(..), enableEval, withSession,
     sessionStart, sessionReload,
     sessionExecAsync, sessionExec, sessionCurrentDir, sessionPathMode,
     ) where
@@ -48,6 +48,15 @@ data StartupFailed = StartupFailed
 
 instance Exception StartupFailed
 
+-- | GHCi's death, reported to the main thread by another thread.
+--   An asynchronous exception, so no handler for 'GhciError' takes it.
+newtype GhciDied = GhciDied GhciError
+    deriving Show
+
+instance Exception GhciDied where
+    toException = asyncExceptionToException
+    fromException = asyncExceptionFromException
+
 data PathMode = PathRelative | PathAbsolute | PathUnknown
     deriving (Eq, Show)
 
@@ -83,9 +92,11 @@ withSession f = do
 -- Up to three threads learn that the session's GHCi died: the main thread
 -- talking to it, a thread running an async test on it, and the thread waiting
 -- on its process. Each reports the death only after letting go of that GHCi
--- with 'letGo', so exactly one 'GhciError' reaches the main thread, and a GHCi
--- the session already let go of (killed for a restart) is no news. A main
--- thread that loses waits for the winner's report instead of raising its own.
+-- with 'letGo', so exactly one report reaches the main thread, and a GHCi the
+-- session already let go of (killed for a restart) is no news. Other threads
+-- report with the asynchronous 'GhciDied', which the main thread's own handler
+-- for its 'GhciError' cannot take. A main thread that loses waits for the
+-- winner's report instead of raising its own.
 
 -- | Let go of the session's GHCi if it is still the given one, True for the one
 --   caller that did. See Note [Reporting GHCi's death]
@@ -168,7 +179,7 @@ sessionStart Session{..} cmd setup = do
         void $ waitForProcess $ process v
         whenM (letGo ghci v) $ do
             kill v
-            throwTo withThread $ UnexpectedExit cmd "" Nothing
+            throwTo withThread $ GhciDied $ UnexpectedExit cmd "" Nothing
 
     -- handle what the process returned
     messages <- pure $ mapMaybe tidyMessage messages
@@ -279,7 +290,7 @@ sessionExecAsync Session{..} cmd done = do
     modifyVar_ running $ const $ pure True
     caller <- myThreadId
     -- See Note [Reporting GHCi's death]
-    let failed e = whenM (letGo ghci v) $ kill v >> throwTo caller e
+    let failed e = whenM (letGo ghci v) $ kill v >> throwTo caller (maybe e (toException . GhciDied) $ fromException e)
     void $ flip forkFinally (either failed (const $ pure ())) $ do
         execStream v cmd $ \strm msg ->
             when (msg /= "*** Exception: ExitSuccess") $ do
