@@ -202,17 +202,20 @@ dotGhciTest = testCase "Ghcid .ghci" $ copyDir "test/foo" $ do
     ignore $ void $ system "chmod go-w .ghci"
     withGhcid ["--test=:test"] $ \require -> do
         require [allGoodMessage]
-        sleep 1 -- time to write out the test
-        readFile "test.txt" >>= (@?= "X") -- the test writes out X
+        awaitFile "test.txt" ((>= 1) . length) >>= (@?= "X") -- the test writes out X
         append "Test.hs" "\n"
         require [allGoodMessage]
-        sleep 1 -- time to write out the test
-        readFile "test.txt" >>= (@?= "XX")
-        print =<< readFile ".ghci"
-        write ".ghci" ":set -fwarn-unused-imports\n:load Root Paths.hs Test"
+        awaitFile "test.txt" ((>= 2) . length) >>= (@?= "XX")
+        let dotGhci warn = write ".ghci" $ unlines
+                [":set -f" ++ warn ++ "warn-unused-imports", ":load Root Paths.hs Test", ":def test \\_ -> return \"Test.main\""]
+        dotGhci ""
         require ["The import of Paths_foo is redundant"]
-        sleep 1 -- time to write out the test
-        readFile "test.txt" >>= (@?= "XX") -- but shouldn't run on warning
+        write "Test.hs" "module Test(main) where\nmain = appendFile \"test.txt\" \"Y\""
+        require ["The import of Paths_foo is redundant"]
+        dotGhci "no-"
+        require [allGoodMessage]
+        -- neither load with a warning ran the test
+        awaitFile "test.txt" ("Y" `isSuffixOf`) >>= (@?= "XXY")
 
 
 loadConfigRestartFilterTest :: TestTree
