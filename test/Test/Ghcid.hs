@@ -59,6 +59,8 @@ ghcidTest = testGroup "Ghcid test"
 #if !defined(mingw32_HOST_OS)
     ,sigtermTest
     ,missedChangeTest
+    ,idleDeathTest
+    ,reloadDeathTest
 #endif
     ]
 
@@ -396,6 +398,36 @@ sigtermTest = testCase "Ghcid SIGTERM takes a busy GHCi down with it" $ freshDir
             void $ awaiting "ghcid to exit" $ waitForProcess childProcess
             pollUntil "ghcid to take its GHCi child down" $ not <$> ghciAlive
 #endif
+
+idleDeathTest :: TestTree
+idleDeathTest = disable19650 $ testCase "GHCi dying while idle leaves ghcid waiting for a change" $ freshDir $ \sb -> do
+    write sb "Main.hs" $ unlines
+        ["import System.Posix.Process"
+        ,"main = writeFile \"ghci.pid\" . show =<< getProcessID"
+        ]
+    withGhcid sb ["-cghci Main.hs", "--test=main"] $ \require -> do
+        require [allGoodMessage]
+        pid <- awaitFile (path sb "ghci.pid") (not . null)
+        signalProcess sigKILL $ read pid
+        require ["exited unexpectedly"]
+        write sb "Main.hs" "main = print 1"
+        require [allGoodMessage]
+
+reloadDeathTest :: TestTree
+reloadDeathTest = disable19650 $ testCase "GHCi dying during a reload leaves ghcid waiting for a change" $ freshDir $ \sb -> do
+    write sb "Main.hs" "main = print 1"
+    withGhcid sb ["-cghci Main.hs"] $ \require -> do
+        require [allGoodMessage]
+        write sb "Main.hs" $ unlines
+            ["{-# LANGUAGE TemplateHaskell #-}"
+            ,"import Language.Haskell.TH.Syntax"
+            ,"import System.Exit"
+            ,"import System.Posix.Process"
+            ,"main = print $(runIO (exitImmediately $ ExitFailure 1) >> lift ())"
+            ]
+        require ["exited unexpectedly"]
+        write sb "Main.hs" "main = print 2"
+        require [allGoodMessage]
 
 -- | Wait for a file to satisfy a predicate.
 awaitFile :: FilePath -> (String -> Bool) -> IO String

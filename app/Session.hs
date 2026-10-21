@@ -1,4 +1,4 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecordWildCards, ScopedTypeVariables #-}
 
 -- | A persistent version of the Ghci session, encoding lots of semantics on top.
 --   Not suitable for calling multithreaded.
@@ -78,6 +78,26 @@ withSession f = do
         logDebug "Finish finally"
 
 
+-- Note [Reporting GHCi's death]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- Up to three threads learn that the session's GHCi died: the main thread
+-- talking to it, a thread running an async test on it, and the thread waiting
+-- on its process. Each reports the death only after letting go of that GHCi
+-- with 'letGo', so exactly one 'GhciError' reaches the main thread, and a GHCi
+-- the session already let go of (killed for a restart) is no news. A main
+-- thread that loses waits for the winner's report instead of raising its own.
+
+-- | Let go of the session's GHCi if it is still the given one, True for the one
+--   caller that did. See Note [Reporting GHCi's death]
+letGo :: IORef (Maybe Ghci) -> Ghci -> IO Bool
+letGo ref v = atomicModifyIORef' ref $ \g -> if g == Just v then (Nothing, True) else (g, False)
+
+-- | Run a step on the session's GHCi from the main thread. See Note [Reporting GHCi's death]
+withGhci :: Session -> (Ghci -> IO a) -> IO a
+withGhci Session{..} act = do
+    Just v <- readIORef ghci
+    act v `catch` \(e :: GhciError) -> ifM (letGo ghci v) (kill v >> throwIO e) (forever $ sleep 1e6)
+
 -- | Kill immediately.
 kill :: Ghci -> IO ()
 kill ghci = ignored $ do
@@ -143,13 +163,12 @@ sessionStart Session{..} cmd setup = do
         evals <- performEvals v allowEval loaded
         pure (v, messages, dir, loaded, evals)
 
-    -- install a handler
+    -- See Note [Reporting GHCi's death]
     forkIO $ do
-        code <- waitForProcess $ process v
-        whenJustM (readIORef ghci) $ \ghci ->
-            when (ghci == v) $ do
-                sleep 0.3 -- give anyone reading from the stream a chance to throw first
-                throwTo withThread $ ErrorCall $ "Command \"" ++ cmd ++ "\" exited unexpectedly with " ++ show code
+        void $ waitForProcess $ process v
+        whenM (letGo ghci v) $ do
+            kill v
+            throwTo withThread $ UnexpectedExit cmd "" Nothing
 
     -- handle what the process returned
     messages <- pure $ mapMaybe tidyMessage messages
@@ -230,9 +249,8 @@ sessionReload session@Session{..} = do
 
     if stuck
       then (\(messages,loaded) -> (messages,loaded,loaded)) <$> sessionRestart session
-      else do
+      else withGhci session $ \ghci -> do
         -- actually reload
-        Just ghci <- readIORef ghci
         dir <- readIORef curdir
         messages <- mapMaybe tidyMessage <$> reload ghci
         shownModules <- showModules ghci
@@ -260,8 +278,8 @@ sessionExecAsync Session{..} cmd done = do
     stderr <- newIORef ""
     modifyVar_ running $ const $ pure True
     caller <- myThreadId
-    -- a GHCi the session has since let go of was killed on purpose, so its failure is no news
-    let failed e = whenJustM (readIORef ghci) $ \now -> when (now == v) $ throwTo caller e
+    -- See Note [Reporting GHCi's death]
+    let failed e = whenM (letGo ghci v) $ kill v >> throwTo caller e
     void $ flip forkFinally (either failed (const $ pure ())) $ do
         execStream v cmd $ \strm msg ->
             when (msg /= "*** Exception: ExitSuccess") $ do

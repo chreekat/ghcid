@@ -12,6 +12,7 @@ import Control.Exception
 import System.IO.Error
 import Control.Applicative
 import Control.Monad.Extra
+import Data.IORef
 import Data.List.Extra
 import Data.Maybe
 import Data.Ord
@@ -372,6 +373,8 @@ mainWithTerminal termSize termOutput = do
 
                 let output = clear . termOutput . restyle
                 maybe (withWaiterNotify $ sleep auditPeriod) withWaiterPoll (poll opts) $ \waiter -> do
+                    -- waits for a change worth restarting a dead session for; see 'runGhcid'
+                    afterDeath <- newIORef $ pure ()
                     let exited (UnexpectedExit cmd _ mmsg) transcript = do
                             -- A dead session (e.g. a broken .cabal file) can only be
                             -- restarted, so sit out the broken state until a change.
@@ -379,10 +382,9 @@ mainWithTerminal termSize termOutput = do
                             output $ ["Command \"" ++ cmd ++ "\" exited unexpectedly"]
                                 ++ maybeToList mmsg
                                 ++ ["Waiting for changes that will restart ghcid."]
-                            nextWait <- waitFilesReporting waiter
-                            void $ nextWait $ map (,()) $ restart opts ++ reload opts
+                            join $ readIORef afterDeath
                             pure Continue
-                    runGhcid (if allow_eval opts then enableEval session else session) waiter termSize output outputs opts serverEnv
+                    runGhcid (if allow_eval opts then enableEval session else session) waiter afterDeath termSize output outputs opts serverEnv
                         `catches`
                             [Handler $ \(StartupFailed e transcript) -> exited e transcript
                             ,Handler $ \e -> exited e $ maybeToList $ ghciErrorLastStdErr e
@@ -427,8 +429,8 @@ data ReloadMode = Reload | Restart deriving (Show, Ord, Eq)
 
 -- If we return successfully, we restart the whole process
 -- Use Continue not () so that inadvertent exits don't restart
-runGhcid :: Session -> Waiter -> IO TermSize -> ([String] -> IO ()) -> OutputFiles -> Options -> Maybe ServerEnv -> IO Continue
-runGhcid session waiter termSize termOutput outputs opts@Options{..} serverEnv = do
+runGhcid :: Session -> Waiter -> IORef (IO ()) -> IO TermSize -> ([String] -> IO ()) -> OutputFiles -> Options -> Maybe ServerEnv -> IO Continue
+runGhcid session waiter afterDeath termSize termOutput outputs opts@Options{..} serverEnv = do
     let limitMessages = maybe id (take . max 1) max_messages
 
     let outputFill :: String -> Maybe (Int, [Load]) -> [EvalResult] -> [String] -> IO ()
@@ -466,6 +468,8 @@ runGhcid session waiter termSize termOutput outputs opts@Options{..} serverEnv =
         fatal ["--reload must be set when using --ignore-loaded"]
 
     nextWait <- waitFilesReporting waiter
+    -- a dead session restarts on any change since its load began, to what it watches
+    writeIORef afterDeath $ void $ nextWait $ map (,Restart) $ restart ++ reload
     outputLoading outputs -- See Note [Output file header]
     (messages, loaded) <- sessionStart session command $
         map (":set " ++) ghciFlagsUseful ++ setup
@@ -487,6 +491,7 @@ runGhcid session waiter termSize termOutput outputs opts@Options{..} serverEnv =
         -> ([Load], [FilePath], [FilePath])
         -> IO Continue
       fire nextWait (messages, loaded, touched) = do
+            writeIORef afterDeath $ void $ nextWait $ map (,Restart) $ restart ++ reload ++ loaded
             currTime <- getShortTime
             let loadedCount = length loaded
             logDebug $ "MESSAGES: " ++ show messages

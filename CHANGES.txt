@@ -22,6 +22,8 @@ Unreleased
         restart the file watcher if it missed a change
     Restarting while a --test runs no longer reports the replaced GHCi
         as exited and waits for a change instead of loading
+    Wait for a change instead of crashing when GHCi dies after startup,
+        and restart on a change to any file the session watched
 
 1.0.0, released 2026-08-18
     #397, #399, #400, promptly clean up entire process groups and force
