@@ -7,7 +7,6 @@ import Test.Tasty.Runners (NumThreads(..))
 import System.Environment
 import System.IO
 
-import qualified Ghcid
 import Test.Util
 import Test.Parser
 import Test.Auto
@@ -19,10 +18,9 @@ import Test.Wait
 main :: IO ()
 main = do
     hSetBuffering stdout NoBuffering
-    -- With GHCID_TEST_CHILD set, act as a real ghcid process, for tests
-    -- that need to signal one
+    -- See Note [Ghcid under test]
     child <- lookupEnv "GHCID_TEST_CHILD"
-    if isJust child then Ghcid.main else defaultMain tests
+    if isJust child then ghcidChild else defaultMain tests
 
 tests :: TestTree
 -- Several integration tests temporarily change the process-wide current
