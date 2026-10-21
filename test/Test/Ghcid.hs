@@ -196,12 +196,13 @@ withChild sb args act = withTempDir $ \home -> do
 withGhcid :: Sandbox -> [String] -> (([String] -> IO ()) -> IO a) -> IO a
 withGhcid sb args script = withChild sb (["--quiet","--no-title","--no-status"] ++ args) $ \Child{..} -> do
     let require want = do
-            screen <- awaiting ("a screen containing " ++ show want) $ readChan childScreens
+            screen <- timeout hangGuard $ readChan childScreens
             logs <- reverse <$> readIORef childLog
             let context = "\nghcid logged:\n" ++ unlines logs
             case screen of
-                Nothing -> assertFailure $ "ghcid stopped before showing " ++ show want ++ context
-                Just got -> assertApproxInfix want got context
+                Nothing -> assertFailure $ "Hung waiting for a screen containing " ++ show want ++ context
+                Just Nothing -> assertFailure $ "ghcid stopped before showing " ++ show want ++ context
+                Just (Just got) -> assertApproxInfix want got context
             -- Ensure the next write gets a distinguishable modification time. Sleeping
             -- for exactly the measured resolution can still leave both writes in the
             -- same timestamp bucket when the sleep straddles its boundary imprecisely.
