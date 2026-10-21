@@ -3,7 +3,6 @@ module Test(main) where
 
 import Data.Maybe
 import Test.Tasty
-import Test.Tasty.Runners (NumThreads(..))
 import System.Environment
 import System.IO
 
@@ -23,9 +22,7 @@ main = do
     if isJust child then ghcidChild else defaultMain tests
 
 tests :: TestTree
--- Several integration tests temporarily change the process-wide current
--- directory, so they must not overlap with each other.
-tests = localOption (NumThreads 1) $ testGroup "Tests"
+tests = testGroup "Tests"
     [utilsTests
     ,parserTests
     ,autoTests
