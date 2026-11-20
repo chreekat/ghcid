@@ -177,7 +177,7 @@ jMessages xs =
         ,("file",jString loadFile)] ++
         [("start",pair loadFilePos) | loadFilePos /= (0,0)] ++
         [("end", pair loadFilePosEnd) | loadFilePos /= loadFilePosEnd] ++
-        [("message", jString $ intercalate "\n" loadMessage)]
+        [("message", jString $ intercalate "\n" $ map unescape loadMessage)]
     | Message{..} <- xs]
     where pair (a,b) = "[" ++ show a ++ "," ++ show b ++ "]"
 

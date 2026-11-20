@@ -2,6 +2,7 @@
 module Test.OutputFile(outputFileTests) where
 
 import Data.Char
+import Data.List
 import Data.Time
 import System.FilePath
 import System.IO.Extra
@@ -9,6 +10,7 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Language.Haskell.Ghcid.Parser
+import Language.Haskell.Ghcid.Types
 import OutputFile
 
 
@@ -39,6 +41,11 @@ outputFileTests = testGroup "Output file"
         parseLoad [header] @?= []
         -- quickfix's %f:%l:%m would read any colon followed by a digit as a location
         assertBool header $ not $ any (\(a,b) -> a == ':' && isDigit b) $ zip header (drop 1 header)
+    ,testCase "JSON messages are plain text even when GHC colours them" $ do
+        let coloured = Message Error "/p/Main.hs" (1,1) (1,1) ["\ESC[;1m/p/Main.hs:1:1: \ESC[;1m\ESC[31merror:\ESC[0m\ESC[0m\ESC[;1m", "    oops\ESC[0m"]
+            json = renderReport JsonFormat $ Report 1 started $ Finished $ Loaded ["/p/Main.hs"] [coloured] []
+        filter (== '\ESC') json @?= ""
+        "/p/Main.hs:1:1: error:\\n    oops" `isInfixOf` json @? json
     ,testCase "Each load attempt gets the next generation and shows the previous outcome while it runs" $
         withTempDir $ \dir -> do
             let file = dir </> "errors.err"
