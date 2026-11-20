@@ -81,9 +81,11 @@ startGhciProcess process echo0 = do
                 -- Prepend a leading \n to try and avoid junk already on stdout,
                 -- e.g. https://github.com/ndmitchell/ghcid/issues/291
                 writeInp "\n"
-                -- Defining fromString lets us use string literals even when RebindableSyntax is on
-                writeInp $ "let fromString s = s in INTERNAL_GHCID.putStrLn " ++ show msg ++ "\n"
-                writeInp $ "let fromString s = s in INTERNAL_GHCID.hPutStrLn INTERNAL_GHCID.stderr " ++ show msg ++ "\n"
+                -- Char literals consed onto a qualified mempty: no name from the interactive
+                -- context and no literal syntax that an extension can rebind or overload
+                let marker = "(" ++ concatMap (\c -> show c ++ ":") msg ++ "INTERNAL_GHCID.mempty)"
+                writeInp $ "INTERNAL_GHCID.putStrLn " ++ marker ++ "\n"
+                writeInp $ "INTERNAL_GHCID.hPutStrLn INTERNAL_GHCID.stderr " ++ marker ++ "\n"
                 pure $ isInfixOf msg
         let syncFresh = do
                 modifyVar_ syncCount $ pure . succ
@@ -172,6 +174,7 @@ startGhciProcess process echo0 = do
                     writeIORef stdout []
                     writeIORef stderr []
                     writeInp "import qualified System.IO as INTERNAL_GHCID"
+                    writeInp "import qualified Data.Monoid as INTERNAL_GHCID" -- see syncReplay
                     writeInp ":unset +t +s" -- see https://github.com/ndmitchell/ghcid/issues/162
                     writeInp $ ":set prompt " ++ ghcid_prefix
                     writeInp $ ":set prompt-cont " ++ ghcid_prefix

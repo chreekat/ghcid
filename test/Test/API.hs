@@ -38,6 +38,15 @@ apiTests = localOption (mkTimeout $ ceiling $ hangGuard * 1000000) $ testGroup "
         exec ghci "a + 1" >>= (@?= ["457"])
         stopGhci ghci
 
+    ,disable19650 $ testCase "Exec works under -Werror and rebindable syntax with fromString in scope (#429)" $ withTempDir $ \dir -> do
+        writeFile (dir </> "File.hs") "module A(a) where\nimport Data.String (fromString)\na :: String\na = fromString \"a\""
+        echo <- testEcho
+        (ghci, load) <- startGhci "ghci -ignore-dot-ghci -Wall -Werror File.hs" (Just dir) echo
+        load @?= [Loading "A" "File.hs"]
+        exec ghci ":seti -XRebindableSyntax -XOverloadedStrings -XOverloadedLists"
+        exec ghci "a" >>= (@?= ["\"a\""])
+        stopGhci ghci
+
     -- ,testCase "Rewrite IDE paths" $ do
     --     let projectDir = "/project"
     --     rewriteRequestForGhci PathRelative projectDir ":type-at /project/app/Main.hs 5 34 5 38"

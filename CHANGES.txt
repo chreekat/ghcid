@@ -27,6 +27,7 @@ Unreleased
     Compile with half the processors by default, so concurrent sessions
         share the machine, and add --jobs to choose the parallelism
     JSON output files carry messages without ANSI escape codes
+    #429, sync with GHCi under -Werror when fromString is in scope
 
 1.0.0, released 2026-08-18
     #397, #399, #400, promptly clean up entire process groups and force
