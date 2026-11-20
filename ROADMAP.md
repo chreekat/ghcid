@@ -32,7 +32,8 @@ retire wrapper scripts and external pollers, then parity nice-to-haves.
    `let fromString s = s in ...`, shadows an imported `fromString`, so a
    `-Wall -Werror` project fails every load with `Werror=name-shadowing` in
    `<interactive>` (upstream #429). Build the marker without a string
-   literal, so neither shadowing nor `RebindableSyntax` matters.
+   literal, so neither shadowing nor `RebindableSyntax` matters. Done
+   2026-11-20.
 2. A hung session (GHCi never returns its prompt) goes undetected: GHC sits
    idle and the output file stays at `state=loading`. Detect it and report it,
    or restart. One candidate cause of the silent stall milestone 1 diagnosed.
