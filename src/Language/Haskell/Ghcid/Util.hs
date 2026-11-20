@@ -58,11 +58,12 @@ ghciFlagsRequiredVersioned =
     ["-fno-hide-source-paths" -- see #132, GHC 8.2 and above
     ]
 
--- | Flags that make ghcid work better and are supported on all GHC versions
-ghciFlagsUseful :: [String]
-ghciFlagsUseful =
+-- | Flags that make ghcid work better and are supported on all GHC versions,
+--   given how many modules to compile in parallel ('Nothing' for one per processor)
+ghciFlagsUseful :: Maybe Int -> [String]
+ghciFlagsUseful jobs =
     ["-ferror-spans" -- see #148
-    ,"-j" -- see #153, GHC 7.8 and above, but that's all I support anyway
+    ,"-j" ++ maybe "" show jobs -- see #153, GHC 7.8 and above, but that's all I support anyway
     ,"-fdiagnostics-color=always"
     ]
 

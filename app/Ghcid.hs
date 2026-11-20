@@ -8,6 +8,7 @@ module Ghcid(
     ) where
 
 import Control.Concurrent
+import GHC.Conc (getNumProcessors)
 import Control.Exception
 import System.IO.Error
 import Control.Applicative
@@ -76,6 +77,7 @@ data Options = Options
     ,allow_eval :: Bool
     ,server :: Bool
     ,target :: [String]
+    ,jobs :: Maybe Int
     }
     deriving (Data,Typeable,Show)
 
@@ -113,10 +115,11 @@ options = cmdArgsMode $ Options
     ,max_messages = Nothing &= name "n" &= help "Maximum number of messages to print"
     ,color = Auto &= name "colour" &= name "color" &= opt Always &= typ "always/never/auto" &= help "Color output (defaults to when the terminal supports it)"
     ,setup = [] &= name "setup" &= typ "COMMAND" &= help "Setup commands to pass to ghci on stdin, usually :set <something>"
-    ,no_cabal_repl_rtsopts = False &= explicit &= name "no-cabal-repl-rtsopts" &= help "Disable default +RTS -N -A64m -RTS when using the auto-selected cabal repl command"
+    ,no_cabal_repl_rtsopts = False &= explicit &= name "no-cabal-repl-rtsopts" &= help "Disable default +RTS -N<jobs> -A64m -RTS when using the auto-selected cabal repl command"
     ,allow_eval = False &= name "allow-eval" &= help "Execute REPL commands in comments"
     ,server = False &= explicit &= name "server" &= help "Enable the local ghcid socket server"
     ,target = [] &= typ "TARGET" &= help "Target Component to build (e.g. lib:foo for Cabal, foo:lib for Stack)"
+    ,jobs = Nothing &= name "j" &= typ "N" &= help "Number of modules to compile in parallel (defaults to half the processors)"
     } &= verbosity &=
     program "ghcid" &= summary ("Auto reloading GHCi daemon v" ++ showVersion version)
 
@@ -156,6 +159,7 @@ data ProjectProbe = ProjectProbe
     ,probeDotGhci :: Bool -- ^ Whether @.ghci@ exists in the current directory
     ,probeGhcVersion :: Maybe Version -- ^ The version of ghc on $PATH
     ,probeCabalVersion :: Maybe Version -- ^ The version of cabal on $PATH
+    ,probeProcessors :: Int -- ^ The number of processors ghcid may run on
     }
 
 probeProject :: IO ProjectProbe
@@ -177,6 +181,7 @@ probeProject = do
         if isNothing stackFile && (cabalFiles /= [] || cabalProject /= [])
             then (,) <$> probeVersion "ghc" <*> probeVersion "cabal"
             else pure (Nothing, Nothing)
+    processors <- getNumProcessors
     pure ProjectProbe
         {probeCurdir = curdir
         ,probeStackYaml = stackFile
@@ -185,6 +190,7 @@ probeProject = do
         ,probeDotGhci = ".ghci" `elem` files
         ,probeGhcVersion = ghcVersion
         ,probeCabalVersion = cabalVersion
+        ,probeProcessors = processors
         }
 
 probeVersion :: String -> IO (Maybe Version)
@@ -213,7 +219,7 @@ autoCommand o@Options{..} ghciScript ProjectProbe{..}
                         "stack exec --test --bench -- ghci" : opts
         in f flags $ stack:probeCabalFiles
     | probeCabalFiles /= [] || probeCabalProject /= [] =
-        let rtsopts = ["\"+RTS -N -A64m -RTS\"" | not no_cabal_repl_rtsopts]
+        let rtsopts = ["\"+RTS -N" ++ show parallelism ++ " -A64m -RTS\"" | not no_cabal_repl_rtsopts]
             since v flag = [flag | probeGhcVersion >= Just (makeVersion v)]
             multiRepl = probeCabalVersion >= Just (makeVersion [3,12])
                      && probeGhcVersion >= Just (makeVersion [9,4])
@@ -241,8 +247,10 @@ autoCommand o@Options{..} ghciScript ProjectProbe{..}
                    && null run
                    && not allow_eval
                    && (isJust probeStackYaml || all isLib target) ]
-        opts = noCode ++ ghciFlagsRequired ++ ghciFlagsUseful ++ ["-ghci-script=" ++ ghciScript]
-        f c r = o{command = unwords $ c ++ map escape arguments, arguments = [], restart = restart ++ r, run = [], test = run ++ test}
+        -- half the processors leaves room for a concurrent session, e.g. in another worktree
+        parallelism = fromMaybe (max 1 $ probeProcessors `div` 2) jobs
+        opts = noCode ++ ghciFlagsRequired ++ ghciFlagsUseful (Just parallelism) ++ ["-ghci-script=" ++ ghciScript]
+        f c r = o{command = unwords $ c ++ map escape arguments, arguments = [], restart = restart ++ r, run = [], test = run ++ test, jobs = Just parallelism}
 
 -- | Simple escaping for command line arguments. Wraps a string in double quotes if it contains a space.
 escape x | ' ' `elem` x = "\"" ++ x ++ "\""
@@ -473,7 +481,7 @@ runGhcid session waiter afterDeath termSize termOutput outputs opts@Options{..} 
     writeIORef afterDeath $ void $ nextWait $ map (,Restart) $ restart ++ reload
     outputLoading outputs -- See Note [Output file header]
     (messages, loaded) <- sessionStart session command $
-        map (":set " ++) ghciFlagsUseful ++ setup
+        map (":set " ++) (ghciFlagsUseful jobs) ++ setup
 
     -- Update server with initial messages
     mapM_ (`updateMessages` messages) serverEnv

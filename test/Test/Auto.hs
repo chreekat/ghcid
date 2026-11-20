@@ -22,7 +22,7 @@ defaultOptions = Options
     ,reload = [], restart = [], directory = ".", outputfile = []
     ,ignoreLoaded = False, poll = Nothing, max_messages = Nothing
     ,color = Never, setup = [], no_cabal_repl_rtsopts = False
-    ,allow_eval = False, server = False, target = []}
+    ,allow_eval = False, server = False, target = [], jobs = Nothing}
 
 bareProbe :: ProjectProbe
 bareProbe = ProjectProbe
@@ -32,7 +32,8 @@ bareProbe = ProjectProbe
     ,probeCabalFiles = []
     ,probeDotGhci = False
     ,probeGhcVersion = Nothing
-    ,probeCabalVersion = Nothing}
+    ,probeCabalVersion = Nothing
+    ,probeProcessors = 16}
 
 cabalProbe :: ProjectProbe
 cabalProbe = bareProbe{probeCabalFiles = ["/proj/foo.cabal"]}
@@ -82,7 +83,7 @@ autoTests = testGroup "Auto command"
         o `commandHas` "-fprefer-byte-code"
         o `commandHas` "-fwrite-if-simplified-core"
         o `commandHas` "-fno-break-points"
-        o `commandHas` "+RTS -N -A64m -RTS"
+        o `commandHas` "+RTS -N8 -A64m -RTS"
     ,testCase "Cabal project on an old toolchain" $ do
         let o = auto defaultOptions modernProbe
                 {probeGhcVersion = Just $ makeVersion [8,8,4]
@@ -92,6 +93,20 @@ autoTests = testGroup "Auto command"
         o `commandLacks` "-fdefer-diagnostics"
         o `commandLacks` "-fprefer-byte-code"
         o `commandLacks` "-fno-break-points"
+    ,testCase "Auto command uses half the cores" $ do
+        let o = auto defaultOptions modernProbe
+        o `commandHas` "--repl-options=-j8 "
+        o `commandHas` "-N8 "
+        jobs o @?= Just 8
+    ,testCase "Auto command uses one core on a single-core machine" $
+        jobs (auto defaultOptions modernProbe{probeProcessors = 1}) @?= Just 1
+    ,testCase "--jobs sets the session's parallelism" $ do
+        let o = auto defaultOptions{jobs = Just 3} modernProbe
+        o `commandHas` "--repl-options=-j3 "
+        o `commandHas` "-N3 "
+        jobs o @?= Just 3
+    ,testCase "A custom command gets the default parallelism" $
+        jobs (auto defaultOptions{command = "my repl"} modernProbe) @?= Just 8
     ,testCase "Explicit --target suppresses the all target" $ do
         let o = auto defaultOptions{target = ["lib:foo"]} modernProbe
         o `commandHas` "--enable-multi-repl"

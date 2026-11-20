@@ -24,6 +24,8 @@ Unreleased
         as exited and waits for a change instead of loading
     Wait for a change instead of crashing when GHCi dies after startup,
         and restart on a change to any file the session watched
+    Compile with half the processors by default, so concurrent sessions
+        share the machine, and add --jobs to choose the parallelism
 
 1.0.0, released 2026-08-18
     #397, #399, #400, promptly clean up entire process groups and force
