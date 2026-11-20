@@ -1,10 +1,14 @@
 # Roadmap
 
-Loading everything is the default because it is the fastest way to work when
-the whole project fits in memory. When it doesn't (a project too big, or too
-many worktrees running at once), the alternative today is `cabal build`, so
-ghcid should also support starting empty and loading modules piecemeal. The
-roadmap runs in three phases:
+ghcid will offer two modes:
+
+- **Load-everything** (the default): the session loads the whole project at
+  startup. It is the fastest way to work when the project fits in memory.
+- **Load-nothing**: the session starts empty and modules are added
+  piecemeal. For when the project doesn't fit in memory (too big, or too many
+  worktrees running at once), where the alternative today is `cabal build`.
+
+The roadmap runs in three phases:
 
 1. Fix bugs and improve features, keeping load-everything as the default.
    Most of this work serves both modes, so avoid baking in new
@@ -12,7 +16,7 @@ roadmap runs in three phases:
 2. Refactor so that what is loaded is ghcid's own explicit state, instead of
    whatever the command loaded as reported back by GHCi (which today drives the
    watch set, the `--test` context and what "All good" means).
-3. Provide both modes.
+3. Add the load-nothing mode alongside load-everything.
 
 Planned work lives here. Known issues with no plan yet live in `bugs`
 (managed with the `t` task tool).
@@ -120,7 +124,7 @@ control what reloads vs restarts.
 Steps to be written once phase 1 shows where the load-everything assumptions
 actually sit.
 
-## Phase 3 — Both modes
+## Phase 3 — The load-nothing mode
 
 Sketch, to be refined after phase 2:
 
